@@ -7,6 +7,7 @@ import { saveAs } from "file-saver";
 export default function Home() {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
+  const [novelTitle, setNovelTitle] = useState("");
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [loading, setLoading] = useState(false);
 
@@ -14,6 +15,7 @@ export default function Home() {
     e.preventDefault();
     setLoading(true);
     setStatus("Initializing...");
+    setNovelTitle("");
     setDownloadedCount(0);
 
     try {
@@ -42,6 +44,7 @@ export default function Home() {
 
       const { title, firstUrl, userAgent } = await infoRes.json();
       setStatus(`Found novel: ${title}`);
+      setNovelTitle(title);
 
       // Initialize EPUB
       const zip = new JSZip();
@@ -199,44 +202,81 @@ ${content}
   };
 
   return (
-    <div className="grid grid-rows-[20px_1fr_20px] items-center justify-items-center min-h-screen p-8 pb-20 gap-16 sm:p-20 font-[family-name:var(--font-geist-sans)]">
-      <main className="flex flex-col gap-8 row-start-2 items-center sm:items-start w-full max-w-md">
-        <h1 className="text-2xl font-bold text-center w-full">
+    <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center p-4 font-[family-name:var(--font-geist-sans)]">
+      <main className="bg-white/95 backdrop-blur-md p-8 rounded-2xl shadow-2xl w-full max-w-lg transition-all duration-300 hover:shadow-indigo-500/20">
+        <h1 className="text-3xl font-extrabold text-center mb-8 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
           Novel Downloader
         </h1>
 
-        <form onSubmit={handleDownload} className="flex flex-col gap-4 w-full">
+        <form onSubmit={handleDownload} className="flex flex-col gap-6">
           <div className="flex flex-col gap-2">
-            <label htmlFor="url" className="text-sm font-medium">
+            <label htmlFor="url" className="text-sm font-semibold text-gray-700">
               Novel URL or ID (Kakuyomu)
             </label>
-            <input
-              id="url"
-              type="text"
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              placeholder="https://kakuyomu.jp/works/..."
-              className="p-2 border rounded text-black"
-              required
-            />
+            <div className="relative">
+              <input
+                id="url"
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                placeholder="https://kakuyomu.jp/works/..."
+                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all text-gray-800 placeholder-gray-400"
+                required
+              />
+            </div>
           </div>
+          
           <button
             type="submit"
             disabled={loading}
-            className="bg-blue-600 text-white p-2 rounded hover:bg-blue-700 disabled:bg-gray-400"
+            className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
           >
-            {loading ? "Processing..." : "Download EPUB"}
+            {loading ? (
+              <span className="flex items-center justify-center gap-2">
+                <svg className="animate-spin h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+                Processing...
+              </span>
+            ) : (
+              "Download EPUB"
+            )}
           </button>
         </form>
 
-        {status && (
-          <div className="w-full p-4 bg-gray-100 text-black rounded">
-            <p className="font-medium">{status}</p>
-            {downloadedCount > 0 && (
-              <p className="text-sm mt-2">
-                Downloaded episodes: {downloadedCount}
-              </p>
+        {(novelTitle || status) && (
+          <div className="mt-8 p-6 bg-gray-50 rounded-xl border border-gray-100 shadow-inner">
+            {novelTitle && (
+              <div className="mb-4 pb-4 border-b border-gray-200">
+                <h2 className="text-sm text-gray-500 uppercase tracking-wide font-semibold mb-1">Target Novel</h2>
+                <p className="text-xl font-bold text-gray-800">{novelTitle}</p>
+              </div>
             )}
+            
+            <div className="space-y-2">
+              <div className="flex justify-between items-center">
+                <span className="text-sm font-medium text-gray-600">Status</span>
+                <span className="text-sm font-bold text-purple-600">{status}</span>
+              </div>
+              
+              {downloadedCount > 0 && (
+                <div className="mt-2">
+                  <div className="flex justify-between text-xs text-gray-500 mb-1">
+                    <span>Progress</span>
+                    <span>{downloadedCount} episodes</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 to-purple-500 h-2.5 rounded-full transition-all duration-500 ease-out" 
+                      style={{ width: '100%' }} // Indeterminate or we could calculate if we knew total
+                    >
+                      <div className="w-full h-full animate-pulse bg-white/30"></div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
       </main>
