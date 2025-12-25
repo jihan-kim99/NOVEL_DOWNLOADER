@@ -76,8 +76,14 @@ async function handleNarouInfo(
     },
   });
 
-  if (!response.ok)
+  if (!response.ok) {
+    if (response.status === 403) {
+      throw new Error(
+        "Access Forbidden (403). The server IP is likely blocked by Syosetu. This is common with cloud hosting like Vercel."
+      );
+    }
     throw new Error(`Failed to fetch Narou info: ${response.status}`);
+  }
 
   const html = await response.text();
   const $ = cheerio.load(html);
@@ -183,8 +189,14 @@ async function handleNarouEpisode(url: string, userAgent: string) {
     },
   });
 
-  if (!response.ok)
+  if (!response.ok) {
+    if (response.status === 403) {
+      throw new Error(
+        "Access Forbidden (403). The server IP is likely blocked by Syosetu. This is common with cloud hosting like Vercel."
+      );
+    }
     throw new Error(`Failed to fetch Narou episode: ${response.status}`);
+  }
 
   const html = await response.text();
   const $ = cheerio.load(html);
