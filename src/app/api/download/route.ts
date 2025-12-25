@@ -2,8 +2,6 @@ import { NextResponse } from "next/server";
 import * as cheerio from "cheerio";
 import fs from "fs";
 import path from "path";
-import axios from "axios";
-import https from "https";
 
 // Helper to get a random user agent
 function getRandomUserAgent() {
@@ -215,7 +213,15 @@ function parseNarouEpisode(html: string, url: string) {
   if (!content)
     content = $.html($("#novel_honbun").contents(), { xmlMode: true }) || "";
 
-  if (!content) throw new Error("Could not find content");
+  if (!content) {
+    console.warn(`[WARN] No content found for ${url}`);
+    // Return empty content instead of throwing to allow graceful exit
+    return {
+      title: title || "Unknown",
+      content: "",
+      nextUrl: null,
+    };
+  }
 
   // Next link logic
   let nextUrl: string | null = null;
