@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import * as cheerio from "cheerio";
 import fs from "fs";
 import path from "path";
+import axios from "axios";
+import https from "https";
 
 // Helper to get a random user agent
 function getRandomUserAgent() {
@@ -45,19 +47,27 @@ async function handleKakuyomuInfo(bookId: string, userAgent: string) {
   };
 }
 
-async function handleNarouInfo(bookId: string, userAgent: string) {
+async function handleNarouInfo(
+  bookId: string,
+  userAgent: string,
+  domain: string = "ncode.syosetu.com"
+) {
   // Narou doesn't always have a clean "info" page that links to the first chapter in a simple way for scraping without listing all chapters.
   // The Python script strategy is to go directly to chapter 1.
-  const firstUrl = `https://ncode.syosetu.com/${bookId}/1/`;
+  const firstUrl = `https://${domain}/${bookId}/1/`;
   console.log(`[INFO] Fetching Narou info (via ep 1) from: ${firstUrl}`);
 
-  const response = await fetch(firstUrl, {
-    headers: { "User-Agent": userAgent },
+  const agent = new https.Agent({ family: 4 });
+  const response = await axios.get(firstUrl, {
+    headers: {
+      "User-Agent": userAgent,
+      Cookie: "over18=yes",
+    },
+    httpsAgent: agent,
+    timeout: 10000,
   });
-  if (!response.ok)
-    throw new Error(`Failed to fetch first episode: ${response.status}`);
 
-  const html = await response.text();
+  const html = response.data;
   const $ = cheerio.load(html);
 
   let title = $("title").text().trim();
@@ -90,74 +100,42 @@ async function handleKakuyomuEpisode(url: string, userAgent: string) {
   // Content extraction
   let content = "";
 
-  // Strategy 1: Look for the main content container by ID
-  // Common IDs: contentMain-inner, app
-  // The structure is often: #contentMain-inner > .widget-episodeBody
-  
-  // Let's try to find the element that contains the text directly.
-  // The class .widget-episodeBody is the most reliable one usually.
-  const widgetBody = $(".widget-episodeBody");
-  if (widgetBody.length > 0) {
-      // Get all paragraphs inside
-      const paragraphs = widgetBody.find("p");
+  // Try the user suggested selector: #contentMain-inner > div > div > div
+  // This seems to be the container for the episode body text in some views
+  const userSelector = $("#contentMain-inner > div > div > div");
+  if (userSelector.length > 0) {
+    const paragraphs = userSelector.find("p");
+    if (paragraphs.length > 0) {
+      content = paragraphs
+        .map((i, el) => `<p>${$(el).text()}</p>`)
+        .get()
+        .join("");
+    } else {
+      content = userSelector.html() || "";
+    }
+  }
+
+  // Fallback to the original selector if empty
+  if (!content) {
+    const episodeContentSelector = ".widget-episodeBody.js-episode-body";
+    const contentContainer = $(episodeContentSelector);
+    if (contentContainer.length > 0) {
+      const paragraphs = contentContainer.find("p");
       if (paragraphs.length > 0) {
-          content = paragraphs.map((i, el) => {
-              const text = $(el).text();
-              // Preserve empty lines which are important in novels
-              return text.trim() === "" ? "<br/>" : `<p>${text}</p>`;
-          }).get().join("\n");
+        content = paragraphs
+          .map((i, el) => `<p>${$(el).text()}</p>`)
+          .get()
+          .join("");
       } else {
-          // If no p tags, maybe it's just text nodes or br tags?
-          content = widgetBody.html() || "";
+        content = contentContainer.html() || "";
       }
-  }
-
-  // Strategy 2: User suggested selector #contentMain-inner > div > div > div
-  if (!content) {
-      const userSelector = $("#contentMain-inner > div > div > div");
-      if (userSelector.length > 0) {
-           const paragraphs = userSelector.find("p");
-           if (paragraphs.length > 0) {
-              content = paragraphs.map((i, el) => {
-                  const text = $(el).text();
-                  return text.trim() === "" ? "<br/>" : `<p>${text}</p>`;
-              }).get().join("\n");
-           } else {
-               content = userSelector.html() || "";
-           }
-      }
-  }
-
-  // Strategy 3: Broad search for the longest text block
-  if (!content) {
-      console.log("[DEBUG] Strategies 1 & 2 failed. Trying broad search.");
-      // Find the div with the most text
-      let maxLen = 0;
-      let bestDiv = null;
-      $("div").each((i, el) => {
-          const textLen = $(el).text().length;
-          // Avoid selecting the whole page wrapper
-          if (textLen > maxLen && textLen < 50000 && $(el).find("div").length < 5) {
-              maxLen = textLen;
-              bestDiv = el;
-          }
-      });
-      
-      if (bestDiv) {
-          console.log("[DEBUG] Found best div by text length");
-          const paragraphs = $(bestDiv).find("p");
-          if (paragraphs.length > 0) {
-              content = paragraphs.map((i, el) => `<p>${$(el).text()}</p>`).get().join("\n");
-          } else {
-              content = $(bestDiv).html() || "";
-          }
-      }
+    }
   }
 
   if (!content) {
     console.error(`[ERROR] Could not find content for ${url}`);
-    // Debug log - print more structure
-    console.log("HTML Structure (body):", $("body").html()?.substring(0, 1000));
+    // Debug log
+    console.log("HTML Preview:", html.substring(0, 500));
   } else {
     console.log(`[DEBUG] Content found, length: ${content.length}`);
   }
@@ -173,70 +151,93 @@ async function handleKakuyomuEpisode(url: string, userAgent: string) {
 
 async function handleNarouEpisode(url: string, userAgent: string) {
   console.log(`[INFO] Fetching Narou episode: ${url}`);
-  const response = await fetch(url, { headers: { "User-Agent": userAgent } });
-  if (!response.ok)
-    throw new Error(`Failed to fetch episode: ${response.status}`);
 
-  const html = await response.text();
+  const agent = new https.Agent({ family: 4 });
+  const response = await axios.get(url, {
+    headers: {
+      "User-Agent": userAgent,
+      Cookie: "over18=yes",
+    },
+    httpsAgent: agent,
+    timeout: 10000,
+  });
+
+  const html = response.data;
   const $ = cheerio.load(html);
 
-  // Selectors from Python script
-  let title = $("body > div.l-container > main > article > h1").text().trim();
+  // Improved selectors for Narou (2024/2025 layout)
+  let title = $("h1.p-novel__title").text().trim();
   if (!title) title = $("h1").text().trim();
   if (!title) title = "Episode";
 
-  let content = $(
-    "body > div.l-container > main > article > div.p-novel__body"
-  ).html();
-  if (!content) content = $("div.novel_view").html();
+  // Content selectors: try new layout first, then old
+  let content = "";
+
+  const pNovelBody = $("div.p-novel__body");
+  if (pNovelBody.length > 0) {
+    // The new layout usually has inner divs with class "p-novel__text" (preface, body, afterword)
+    const textDivs = pNovelBody.find("div.p-novel__text");
+
+    if (textDivs.length > 0) {
+      // Iterate through each text block (preface, main, afterword)
+      textDivs.each((_, div) => {
+        $(div)
+          .find("p")
+          .each((_, p) => {
+            // Use xmlMode to ensure self-closing tags like <br /> for EPUB compatibility
+            content += $.html(p, { xmlMode: true });
+          });
+      });
+    } else {
+      // Fallback: just get all p tags inside body if no text divs found
+      pNovelBody.find("p").each((_, p) => {
+        content += $.html(p, { xmlMode: true });
+      });
+    }
+
+    // If still no content found via p tags (unlikely), try raw html
+    if (!content) {
+      content = $.html(pNovelBody.contents(), { xmlMode: true }) || "";
+    }
+  }
+
+  if (!content)
+    content = $.html($("div.novel_view").contents(), { xmlMode: true }) || "";
+  if (!content)
+    content = $.html($("#novel_honbun").contents(), { xmlMode: true }) || "";
+
   if (!content) throw new Error("Could not find content");
 
   // Next link logic
-  // Python:
-  // Ep 1: body > div.l-container > main > article > div:nth-of-type(1) > a:nth-of-type(2)
-  // Ep N: body > div.l-container > main > article > div:nth-of-type(1) > a:nth-of-type(3)
-
-  // We can try to find the link that contains "次" (Next) or use the specific selectors.
-  // Let's try to be a bit more robust by looking for the "next" navigation link class if possible,
-  // but Narou structure is old.
-  // The Python script relies on position.
-
-  // Let's try to find the "bn" (before/next) div.
-  // Usually <div class="novel_bn"> or similar.
-  // But the Python script uses `div:nth-of-type(1)` inside article.
-
-  // Let's try to find all links in the top nav and see which one points to next.
-  // Usually the structure is [Before] [Table of Contents] [Next]
-
   let nextUrl: string | null = null;
-
-  // Try to find a link that looks like a next link
-  const links = $("div.novel_bn").first().find("a");
-  // If we have 2 links, it's usually [Top] [Next] (for ep 1)
-  // If we have 3 links, it's [Prev] [Top] [Next]
-
-  // However, the Python script uses `div:nth-of-type(1)` which might be the top nav.
-  // Let's stick to the Python script's logic but adapted for Cheerio.
-
-  // Note: Cheerio nth-of-type is 1-indexed.
-  const topNav = $("body > div.l-container > main > article > div").first();
-  const navLinks = topNav.find("a");
-
   let nextHref: string | undefined;
 
-  // Check if the last link text contains "次"
-  const lastLink = navLinks.last();
-  if (lastLink.text().includes("次")) {
-    nextHref = lastLink.attr("href");
-  } else {
-    // Fallback to position
-    // If 2 links, 2nd is likely next (if 1st is TOC)
-    // If 3 links, 3rd is likely next
-    if (navLinks.length >= 2) {
-      // Check if it's not "前" (Prev)
-      if (!lastLink.text().includes("前")) {
-        nextHref = lastLink.attr("href");
+  // 1. Try modern class-based selector
+  const nextLink = $("a.c-pager__item--next");
+  if (nextLink.length > 0) {
+    nextHref = nextLink.attr("href");
+  }
+
+  // 2. Fallback to old "novel_bn" structure
+  if (!nextHref) {
+    const bnLinks = $("div.novel_bn").first().find("a");
+    if (bnLinks.length > 0) {
+      const lastBn = bnLinks.last();
+      if (lastBn.text().includes("次")) {
+        nextHref = lastBn.attr("href");
       }
+    }
+  }
+
+  // 3. Fallback to positional logic (from original code)
+  if (!nextHref) {
+    const topNav = $("body > div.l-container > main > article > div").first();
+    const navLinks = topNav.find("a");
+    const lastLink = navLinks.last();
+    if (lastLink.text().includes("次")) {
+      nextHref = lastLink.attr("href");
+    } else if (navLinks.length >= 2 && !lastLink.text().includes("前")) {
+      nextHref = lastLink.attr("href");
     }
   }
 
@@ -244,7 +245,14 @@ async function handleNarouEpisode(url: string, userAgent: string) {
     if (nextHref.startsWith("http")) {
       nextUrl = nextHref;
     } else {
-      nextUrl = `https://ncode.syosetu.com${nextHref}`;
+      // Construct absolute URL based on the current URL's origin
+      try {
+        const currentUrlObj = new URL(url);
+        nextUrl = `${currentUrlObj.origin}${nextHref}`;
+      } catch (e) {
+        // Fallback to ncode if URL parsing fails (shouldn't happen if url is valid)
+        nextUrl = `https://ncode.syosetu.com${nextHref}`;
+      }
     }
   }
 
@@ -258,7 +266,7 @@ async function handleNarouEpisode(url: string, userAgent: string) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    let { type, bookId, url, userAgent, platform } = body;
+    let { type, bookId, url, userAgent, platform, domain } = body;
 
     // If no user agent provided, pick one
     if (!userAgent) {
@@ -282,7 +290,7 @@ export async function POST(request: Request) {
         );
 
       if (platform === "narou") {
-        const data = await handleNarouInfo(bookId, userAgent);
+        const data = await handleNarouInfo(bookId, userAgent, domain);
         return NextResponse.json(data);
       } else {
         const data = await handleKakuyomuInfo(bookId, userAgent);

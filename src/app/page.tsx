@@ -22,6 +22,7 @@ export default function Home() {
       // Extract Book ID and Platform
       let bookId = input.trim();
       let platform = "kakuyomu"; // Default
+      let domain = "";
 
       if (bookId.includes("kakuyomu.jp/works/")) {
         const parts = bookId.split("kakuyomu.jp/works/");
@@ -31,9 +32,17 @@ export default function Home() {
         const parts = bookId.split("ncode.syosetu.com/");
         bookId = parts[1].split("/")[0];
         platform = "narou";
+        domain = "ncode.syosetu.com";
+      } else if (bookId.includes("novel18.syosetu.com/")) {
+        const parts = bookId.split("novel18.syosetu.com/");
+        bookId = parts[1].split("/")[0];
+        platform = "narou";
+        domain = "novel18.syosetu.com";
       } else if (bookId.toLowerCase().startsWith("n")) {
         // Simple heuristic: Narou IDs often start with 'n' (e.g., n5511kh)
         platform = "narou";
+        // Default to ncode if just ID is provided, but this might fail for R18
+        domain = "ncode.syosetu.com";
       }
 
       if (!bookId) {
@@ -45,7 +54,7 @@ export default function Home() {
       const infoRes = await fetch("/api/download", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "info", bookId, platform }),
+        body: JSON.stringify({ type: "info", bookId, platform, domain }),
       });
 
       if (!infoRes.ok) {
