@@ -13,7 +13,7 @@ function getRandomUserAgent() {
     return userAgents[Math.floor(Math.random() * userAgents.length)];
   } catch (error) {
     console.error("Error reading useragent.json:", error);
-    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36";
+    return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
   }
 }
 
@@ -62,6 +62,10 @@ async function handleNarouInfo(
     headers: {
       "User-Agent": userAgent,
       Cookie: "over18=yes",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+      Referer: "https://syosetu.com/",
     },
     httpsAgent: agent,
     timeout: 10000,
@@ -157,6 +161,10 @@ async function handleNarouEpisode(url: string, userAgent: string) {
     headers: {
       "User-Agent": userAgent,
       Cookie: "over18=yes",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+      Referer: "https://syosetu.com/",
     },
     httpsAgent: agent,
     timeout: 10000,
@@ -316,7 +324,11 @@ export async function POST(request: Request) {
   } catch (error: any) {
     console.error("Error processing request:", error);
     return NextResponse.json(
-      { error: error.message || "Internal Server Error" },
+      {
+        error: error.message || "Internal Server Error",
+        details: error.toString(),
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+      },
       { status: 500 }
     );
   }
