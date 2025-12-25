@@ -47,6 +47,21 @@ async function handleKakuyomuInfo(bookId: string, userAgent: string) {
   };
 }
 
+function parseNarouInfo(html: string, firstUrl: string, userAgent: string) {
+  const $ = cheerio.load(html);
+
+  let title = $("title").text().trim();
+  if (title.includes(" - ")) {
+    title = title.split(" - ")[0];
+  }
+
+  return {
+    title: title || "Unknown Title",
+    firstUrl: firstUrl,
+    userAgent,
+  };
+}
+
 async function handleNarouInfo(
   bookId: string,
   userAgent: string,
@@ -86,18 +101,7 @@ async function handleNarouInfo(
   }
 
   const html = await response.text();
-  const $ = cheerio.load(html);
-
-  let title = $("title").text().trim();
-  if (title.includes(" - ")) {
-    title = title.split(" - ")[0];
-  }
-
-  return {
-    title: title || "Unknown Title",
-    firstUrl: firstUrl,
-    userAgent,
-  };
+  return parseNarouInfo(html, firstUrl, userAgent);
 }
 
 async function handleKakuyomuEpisode(url: string, userAgent: string) {
@@ -167,38 +171,7 @@ async function handleKakuyomuEpisode(url: string, userAgent: string) {
   };
 }
 
-async function handleNarouEpisode(url: string, userAgent: string) {
-  console.log(`[INFO] Fetching Narou episode: ${url}`);
-
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent": userAgent,
-      Cookie: "over18=yes",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-      "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
-      Referer: "https://syosetu.com/",
-      "Sec-Ch-Ua":
-        '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-      "Sec-Ch-Ua-Mobile": "?0",
-      "Sec-Ch-Ua-Platform": '"Windows"',
-      "Sec-Fetch-Dest": "document",
-      "Sec-Fetch-Mode": "navigate",
-      "Sec-Fetch-Site": "cross-site",
-      "Upgrade-Insecure-Requests": "1",
-    },
-  });
-
-  if (!response.ok) {
-    if (response.status === 403) {
-      throw new Error(
-        "Access Forbidden (403). The server IP is likely blocked by Syosetu. This is common with cloud hosting like Vercel."
-      );
-    }
-    throw new Error(`Failed to fetch Narou episode: ${response.status}`);
-  }
-
-  const html = await response.text();
+function parseNarouEpisode(html: string, url: string) {
   const $ = cheerio.load(html);
 
   // Improved selectors for Narou (2024/2025 layout)
@@ -299,10 +272,45 @@ async function handleNarouEpisode(url: string, userAgent: string) {
   };
 }
 
+async function handleNarouEpisode(url: string, userAgent: string) {
+  console.log(`[INFO] Fetching Narou episode: ${url}`);
+
+  const response = await fetch(url, {
+    headers: {
+      "User-Agent": userAgent,
+      Cookie: "over18=yes",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+      "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+      Referer: "https://syosetu.com/",
+      "Sec-Ch-Ua":
+        '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+      "Sec-Ch-Ua-Mobile": "?0",
+      "Sec-Ch-Ua-Platform": '"Windows"',
+      "Sec-Fetch-Dest": "document",
+      "Sec-Fetch-Mode": "navigate",
+      "Sec-Fetch-Site": "cross-site",
+      "Upgrade-Insecure-Requests": "1",
+    },
+  });
+
+  if (!response.ok) {
+    if (response.status === 403) {
+      throw new Error(
+        "Access Forbidden (403). The server IP is likely blocked by Syosetu. This is common with cloud hosting like Vercel."
+      );
+    }
+    throw new Error(`Failed to fetch Narou episode: ${response.status}`);
+  }
+
+  const html = await response.text();
+  return parseNarouEpisode(html, url);
+}
+
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    let { type, bookId, url, userAgent, platform, domain } = body;
+    let { type, bookId, url, userAgent, platform, domain, html } = body;
 
     // If no user agent provided, pick one
     if (!userAgent) {
@@ -342,6 +350,40 @@ export async function POST(request: Request) {
       } else {
         const data = await handleKakuyomuEpisode(url, userAgent);
         return NextResponse.json(data);
+      }
+    } else if (type === "parse-info") {
+      if (!html)
+        return NextResponse.json(
+          { error: "HTML is required" },
+          { status: 400 }
+        );
+      if (platform === "narou") {
+        // For parse-info, we need to reconstruct the firstUrl
+        const firstUrl = `https://${
+          domain || "ncode.syosetu.com"
+        }/${bookId}/1/`;
+        const data = parseNarouInfo(html, firstUrl, userAgent);
+        return NextResponse.json(data);
+      } else {
+        return NextResponse.json(
+          { error: "Parse info not supported for this platform" },
+          { status: 400 }
+        );
+      }
+    } else if (type === "parse-episode") {
+      if (!html || !url)
+        return NextResponse.json(
+          { error: "HTML and URL are required" },
+          { status: 400 }
+        );
+      if (platform === "narou") {
+        const data = parseNarouEpisode(html, url);
+        return NextResponse.json(data);
+      } else {
+        return NextResponse.json(
+          { error: "Parse episode not supported for this platform" },
+          { status: 400 }
+        );
       }
     } else {
       return NextResponse.json(

@@ -18,6 +18,61 @@ export default function Home() {
     setNovelTitle("");
     setDownloadedCount(0);
 
+    let useFallback = false;
+
+    const fetchWithFallback = async (
+      url: string,
+      options: any,
+      fallbackType: string,
+      fallbackUrl: string
+    ) => {
+      if (!useFallback) {
+        try {
+          const res = await fetch(url, options);
+          if (!res.ok) {
+            // If 403 or 500, try fallback
+            if (res.status === 403 || res.status === 500) {
+              throw new Error("Server blocked");
+            }
+            throw new Error(`Failed with status ${res.status}`);
+          }
+          return res.json();
+        } catch (error) {
+          console.warn("Primary fetch failed, trying fallback...", error);
+          setStatus(
+            "Primary fetch failed, switching to client-side fallback..."
+          );
+          useFallback = true;
+        }
+      }
+
+      // Fallback: Fetch via CORS proxy
+      // Using allorigins.win
+      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(
+        fallbackUrl
+      )}&timestamp=${Date.now()}`;
+      const proxyRes = await fetch(proxyUrl);
+      if (!proxyRes.ok) throw new Error("Proxy fetch failed");
+      const proxyData = await proxyRes.json();
+      const html = proxyData.contents;
+
+      if (!html) throw new Error("No content from proxy");
+
+      // Send HTML to server for parsing
+      const parseRes = await fetch("/api/download", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...JSON.parse(options.body),
+          type: fallbackType,
+          html,
+        }),
+      });
+
+      if (!parseRes.ok) throw new Error("Parse request failed");
+      return parseRes.json();
+    };
+
     try {
       // Extract Book ID and Platform
       let bookId = input.trim();
@@ -51,17 +106,27 @@ export default function Home() {
 
       // Get Novel Info
       setStatus(`Fetching novel info from ${platform}...`);
-      const infoRes = await fetch("/api/download", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "info", bookId, platform, domain }),
-      });
 
-      if (!infoRes.ok) {
-        throw new Error("Failed to fetch novel info");
+      let targetUrlForInfo = "";
+      if (platform === "narou") {
+        targetUrlForInfo = `https://${
+          domain || "ncode.syosetu.com"
+        }/${bookId}/1/`;
+      } else {
+        targetUrlForInfo = `https://kakuyomu.jp/works/${bookId}`;
       }
 
-      const { title, firstUrl, userAgent } = await infoRes.json();
+      const { title, firstUrl, userAgent } = await fetchWithFallback(
+        "/api/download",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ type: "info", bookId, platform, domain }),
+        },
+        "parse-info",
+        targetUrlForInfo
+      );
+
       setStatus(`Found novel: ${title}`);
       setNovelTitle(title);
 
@@ -88,23 +153,25 @@ export default function Home() {
       while (currentUrl) {
         setStatus(`Downloading episode ${episodeNum}...`);
 
-        const epRes = await fetch("/api/download", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            type: "episode",
-            url: currentUrl,
-            userAgent,
-            platform,
-          }),
-        });
-
-        if (!epRes.ok) {
-          console.error(`Failed to download episode ${episodeNum}`);
-          break;
-        }
-
-        const { title: epTitle, content, nextUrl } = await epRes.json();
+        const {
+          title: epTitle,
+          content,
+          nextUrl,
+        } = await fetchWithFallback(
+          "/api/download",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              type: "episode",
+              url: currentUrl,
+              userAgent,
+              platform,
+            }),
+          },
+          "parse-episode",
+          currentUrl
+        );
 
         const fileName = `chapter_${episodeNum}.xhtml`;
         oebps.file(
