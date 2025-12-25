@@ -11,6 +11,7 @@ export default function Home() {
   const [novelTitle, setNovelTitle] = useState("");
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [loading, setLoading] = useState(false);
+  const [forceClientSide, setForceClientSide] = useState(false);
 
   const handleDownload = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,6 +19,13 @@ export default function Home() {
     setStatus("Initializing...");
     setNovelTitle("");
     setDownloadedCount(0);
+
+    // Local flag to track fallback status within this download session
+    let currentUseClientSide = forceClientSide;
+    const enableClientSide = () => {
+      currentUseClientSide = true;
+      setForceClientSide(true);
+    };
 
     try {
       // Extract Book ID and Platform
@@ -74,7 +82,9 @@ export default function Home() {
         },
         "parse-info",
         targetUrlForInfo,
-        setStatus
+        setStatus,
+        currentUseClientSide,
+        enableClientSide
       );
 
       setStatus(`Found novel: ${title}`);
@@ -109,7 +119,9 @@ export default function Home() {
           },
           "parse-episode",
           currentUrl,
-          setStatus
+          setStatus,
+          currentUseClientSide,
+          enableClientSide
         );
 
         if (!content) {
@@ -177,6 +189,22 @@ ${content}
                 required
               />
             </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <input
+              id="forceClientSide"
+              type="checkbox"
+              checked={forceClientSide}
+              onChange={(e) => setForceClientSide(e.target.checked)}
+              className="w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 focus:ring-2"
+            />
+            <label
+              htmlFor="forceClientSide"
+              className="text-sm font-medium text-gray-700"
+            >
+              Force Client-Side Download (Use if server fails)
+            </label>
           </div>
 
           <button

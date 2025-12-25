@@ -1,13 +1,13 @@
-import { DownloadRequest } from "../types";
-
 export async function fetchWithFallback(
   url: string,
   options: any,
   fallbackType: string,
   fallbackUrl: string,
-  setStatus: (status: string) => void
+  setStatus: (status: string) => void,
+  forceClientSide: boolean = false,
+  onFallback?: () => void
 ) {
-  let useFallback = false;
+  let useFallback = forceClientSide;
 
   if (!useFallback) {
     try {
@@ -23,6 +23,7 @@ export async function fetchWithFallback(
       console.warn("Primary fetch failed, trying fallback...", error);
       setStatus("Primary fetch failed, switching to client-side fallback...");
       useFallback = true;
+      if (onFallback) onFallback();
     }
   }
 

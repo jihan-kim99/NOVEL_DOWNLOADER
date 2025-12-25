@@ -219,11 +219,8 @@ async function handleNarouEpisode(url: string, userAgent: string) {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    let { type, bookId, url, userAgent, domain, html } = body;
-
-    if (!userAgent) {
-      userAgent = getRandomUserAgent();
-    }
+    const { type, bookId, url, domain, html } = body;
+    const userAgent = body.userAgent || getRandomUserAgent();
 
     if (type === "info") {
       if (!bookId)
@@ -233,12 +230,16 @@ export async function POST(request: Request) {
         );
       const data = await handleNarouInfo(bookId, userAgent, domain);
       return NextResponse.json(data);
-    } else if (type === "episode") {
+    }
+
+    if (type === "episode") {
       if (!url)
         return NextResponse.json({ error: "URL is required" }, { status: 400 });
       const data = await handleNarouEpisode(url, userAgent);
       return NextResponse.json(data);
-    } else if (type === "parse-info") {
+    }
+
+    if (type === "parse-info") {
       if (!html)
         return NextResponse.json(
           { error: "HTML is required" },
@@ -247,7 +248,9 @@ export async function POST(request: Request) {
       const firstUrl = `https://${domain || "ncode.syosetu.com"}/${bookId}/1/`;
       const data = parseNarouInfo(html, firstUrl, userAgent);
       return NextResponse.json(data);
-    } else if (type === "parse-episode") {
+    }
+
+    if (type === "parse-episode") {
       if (!html || !url)
         return NextResponse.json(
           { error: "HTML and URL are required" },
@@ -255,12 +258,12 @@ export async function POST(request: Request) {
         );
       const data = parseNarouEpisode(html, url);
       return NextResponse.json(data);
-    } else {
-      return NextResponse.json(
-        { error: "Invalid request type" },
-        { status: 400 }
-      );
     }
+
+    return NextResponse.json(
+      { error: "Invalid request type" },
+      { status: 400 }
+    );
   } catch (error: any) {
     console.error("Error processing Narou request:", error);
     return NextResponse.json(
