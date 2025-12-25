@@ -1,8 +1,9 @@
 "use client";
 
 import { useState } from "react";
-import JSZip from "jszip";
 import { saveAs } from "file-saver";
+import { initializeEpub, generateEpub, Chapter } from "../lib/epub";
+import { fetchWithFallback } from "../lib/narou-client";
 
 export default function Home() {
   const [input, setInput] = useState("");
@@ -17,107 +18,6 @@ export default function Home() {
     setStatus("Initializing...");
     setNovelTitle("");
     setDownloadedCount(0);
-
-    let useFallback = false;
-
-    const fetchWithFallback = async (
-      url: string,
-      options: any,
-      fallbackType: string,
-      fallbackUrl: string
-    ) => {
-      if (!useFallback) {
-        try {
-          const res = await fetch(url, options);
-          if (!res.ok) {
-            // If 403 or 500, try fallback
-            if (res.status === 403 || res.status === 500) {
-              throw new Error("Server blocked");
-            }
-            throw new Error(`Failed with status ${res.status}`);
-          }
-          return res.json();
-        } catch (error) {
-          console.warn("Primary fetch failed, trying fallback...", error);
-          setStatus(
-            "Primary fetch failed, switching to client-side fallback..."
-          );
-          useFallback = true;
-        }
-      }
-
-      // Fallback: Fetch via CORS proxy
-      let html = "";
-
-      // 1. Try corsproxy.io
-      try {
-        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(
-          fallbackUrl
-        )}`;
-
-        // Extract userAgent from options if available
-        const bodyObj = options.body ? JSON.parse(options.body) : {};
-        const ua =
-          bodyObj.userAgent ||
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-        const proxyRes = await fetch(proxyUrl, {
-          headers: {
-            "User-Agent": ua,
-            Cookie: "over18=yes",
-            Accept:
-              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-            "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
-            Referer: "https://syosetu.com/",
-            "Sec-Ch-Ua":
-              '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-            "Sec-Ch-Ua-Mobile": "?0",
-            "Sec-Ch-Ua-Platform": '"Windows"',
-            "Sec-Fetch-Dest": "document",
-            "Sec-Fetch-Mode": "navigate",
-            "Sec-Fetch-Site": "cross-site",
-            "Upgrade-Insecure-Requests": "1",
-          },
-        });
-        if (proxyRes.ok) {
-          html = await proxyRes.text();
-        }
-      } catch (e) {
-        console.warn("corsproxy.io failed", e);
-      }
-
-      // 2. Try allorigins.win if first failed
-      if (!html) {
-        try {
-          const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(
-            fallbackUrl
-          )}&timestamp=${Date.now()}`;
-          const proxyRes = await fetch(proxyUrl);
-          if (proxyRes.ok) {
-            const proxyData = await proxyRes.json();
-            html = proxyData.contents;
-          }
-        } catch (e) {
-          console.warn("allorigins failed", e);
-        }
-      }
-
-      if (!html) throw new Error("All proxies failed to fetch content");
-
-      // Send HTML to server for parsing
-      const parseRes = await fetch("/api/download", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...JSON.parse(options.body),
-          type: fallbackType,
-          html,
-        }),
-      });
-
-      if (!parseRes.ok) throw new Error("Parse request failed");
-      return parseRes.json();
-    };
 
     try {
       // Extract Book ID and Platform
@@ -150,6 +50,9 @@ export default function Home() {
         throw new Error("Invalid Book ID or URL");
       }
 
+      // Determine API endpoint
+      const apiEndpoint = platform === "narou" ? "/api/narou" : "/api/kakuyomu";
+
       // Get Novel Info
       setStatus(`Fetching novel info from ${platform}...`);
 
@@ -157,42 +60,30 @@ export default function Home() {
       if (platform === "narou") {
         targetUrlForInfo = `https://${
           domain || "ncode.syosetu.com"
-        }/${bookId}/1/`;
+        }/${bookId}/`;
       } else {
         targetUrlForInfo = `https://kakuyomu.jp/works/${bookId}`;
       }
 
       const { title, firstUrl, userAgent } = await fetchWithFallback(
-        "/api/download",
+        apiEndpoint,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ type: "info", bookId, platform, domain }),
         },
         "parse-info",
-        targetUrlForInfo
+        targetUrlForInfo,
+        setStatus
       );
 
       setStatus(`Found novel: ${title}`);
       setNovelTitle(title);
 
       // Initialize EPUB
-      const zip = new JSZip();
-      zip.file("mimetype", "application/epub+zip", { compression: "STORE" });
-      zip.folder("META-INF")?.file(
-        "container.xml",
-        `<?xml version="1.0"?>
-<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
-   <rootfiles>
-      <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
-   </rootfiles>
-</container>`
-      );
+      const { zip, oebps } = initializeEpub();
 
-      const oebps = zip.folder("OEBPS");
-      if (!oebps) throw new Error("Failed to create OEBPS folder");
-
-      const chapters: { title: string; fileName: string }[] = [];
+      const chapters: Chapter[] = [];
       let currentUrl = firstUrl;
       let episodeNum = 1;
 
@@ -204,7 +95,7 @@ export default function Home() {
           content,
           nextUrl,
         } = await fetchWithFallback(
-          "/api/download",
+          apiEndpoint,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -213,10 +104,12 @@ export default function Home() {
               url: currentUrl,
               userAgent,
               platform,
+              domain, // Pass domain for Narou parsing if needed
             }),
           },
           "parse-episode",
-          currentUrl
+          currentUrl,
+          setStatus
         );
 
         if (!content) {
@@ -247,91 +140,7 @@ ${content}
       }
 
       setStatus("Generating EPUB...");
-
-      // Generate content.opf
-      const manifestItems = chapters
-        .map(
-          (ch, i) =>
-            `<item id="chapter_${i + 1}" href="${
-              ch.fileName
-            }" media-type="application/xhtml+xml"/>`
-        )
-        .join("\n");
-      const spineItems = chapters
-        .map((ch, i) => `<itemref idref="chapter_${i + 1}"/>`)
-        .join("\n");
-
-      const contentOpf = `<?xml version="1.0" encoding="utf-8"?>
-<package xmlns="http://www.idpf.org/2007/opf" unique-identifier="BookId" version="3.0">
-  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:title>${title}</dc:title>
-    <dc:language>ja</dc:language>
-    <dc:identifier id="BookId">urn:uuid:${bookId}</dc:identifier>
-    <meta property="dcterms:modified">${
-      new Date().toISOString().split(".")[0]
-    }Z</meta>
-  </metadata>
-  <manifest>
-    <item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>
-    <item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>
-    ${manifestItems}
-  </manifest>
-  <spine toc="ncx">
-    <itemref idref="nav"/>
-    ${spineItems}
-  </spine>
-</package>`;
-
-      oebps.file("content.opf", contentOpf);
-
-      // Generate nav.xhtml
-      const navLinks = chapters
-        .map((ch) => `<li><a href="${ch.fileName}">${ch.title}</a></li>`)
-        .join("\n");
-      const navXhtml = `<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ja">
-<head><title>Table of Contents</title></head>
-<body>
-<nav epub:type="toc" id="toc">
-  <h1>Table of Contents</h1>
-  <ol>
-    ${navLinks}
-  </ol>
-</nav>
-</body>
-</html>`;
-      oebps.file("nav.xhtml", navXhtml);
-
-      // Generate toc.ncx
-      const ncxPoints = chapters
-        .map(
-          (ch, i) => `
-    <navPoint id="navPoint-${i + 1}" playOrder="${i + 1}">
-      <navLabel><text>${ch.title}</text></navLabel>
-      <content src="${ch.fileName}"/>
-    </navPoint>`
-        )
-        .join("");
-
-      const tocNcx = `<?xml version="1.0" encoding="UTF-8"?>
-<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
-  <head>
-    <meta name="dtb:uid" content="urn:uuid:${bookId}"/>
-    <meta name="dtb:depth" content="1"/>
-    <meta name="dtb:totalPageCount" content="0"/>
-    <meta name="dtb:maxPageNumber" content="0"/>
-  </head>
-  <docTitle><text>${title}</text></docTitle>
-  <navMap>
-    ${ncxPoints}
-  </navMap>
-</ncx>`;
-      oebps.file("toc.ncx", tocNcx);
-
-      // Generate and save file
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `${title}.epub`);
+      await generateEpub(title, bookId, chapters, zip);
 
       setStatus("Download complete!");
     } catch (error: any) {
