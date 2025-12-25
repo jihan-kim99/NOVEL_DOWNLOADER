@@ -19,8 +19,11 @@ async function handleKakuyomuInfo(bookId: string, userAgent: string) {
   const baseUrl = `https://kakuyomu.jp/works/${bookId}`;
   console.log(`[INFO] Fetching Kakuyomu info from: ${baseUrl}`);
 
-  const response = await fetch(baseUrl, { headers: { "User-Agent": userAgent } });
-  if (!response.ok) throw new Error(`Failed to fetch novel page: ${response.status}`);
+  const response = await fetch(baseUrl, {
+    headers: { "User-Agent": userAgent },
+  });
+  if (!response.ok)
+    throw new Error(`Failed to fetch novel page: ${response.status}`);
 
   const html = await response.text();
   const $ = cheerio.load(html);
@@ -48,8 +51,11 @@ async function handleNarouInfo(bookId: string, userAgent: string) {
   const firstUrl = `https://ncode.syosetu.com/${bookId}/1/`;
   console.log(`[INFO] Fetching Narou info (via ep 1) from: ${firstUrl}`);
 
-  const response = await fetch(firstUrl, { headers: { "User-Agent": userAgent } });
-  if (!response.ok) throw new Error(`Failed to fetch first episode: ${response.status}`);
+  const response = await fetch(firstUrl, {
+    headers: { "User-Agent": userAgent },
+  });
+  if (!response.ok)
+    throw new Error(`Failed to fetch first episode: ${response.status}`);
 
   const html = await response.text();
   const $ = cheerio.load(html);
@@ -69,17 +75,93 @@ async function handleNarouInfo(bookId: string, userAgent: string) {
 async function handleKakuyomuEpisode(url: string, userAgent: string) {
   console.log(`[INFO] Fetching Kakuyomu episode: ${url}`);
   const response = await fetch(url, { headers: { "User-Agent": userAgent } });
-  if (!response.ok) throw new Error(`Failed to fetch episode: ${response.status}`);
+  if (!response.ok)
+    throw new Error(`Failed to fetch episode: ${response.status}`);
 
   const html = await response.text();
   const $ = cheerio.load(html);
 
-  const episodeTitleSelector = ".widget-episodeTitle.js-vertical-composition-item";
-  const episodeContentSelector = ".widget-episodeBody.js-episode-body";
+  const episodeTitleSelector =
+    ".widget-episodeTitle.js-vertical-composition-item";
   const nextLinkSelector = "#contentMain-readNextEpisode";
 
   const title = $(episodeTitleSelector).text().trim() || "Unknown Episode";
-  const content = $(episodeContentSelector).html() || "";
+
+  // Content extraction
+  let content = "";
+
+  // Strategy 1: Look for the main content container by ID
+  // Common IDs: contentMain-inner, app
+  // The structure is often: #contentMain-inner > .widget-episodeBody
+  
+  // Let's try to find the element that contains the text directly.
+  // The class .widget-episodeBody is the most reliable one usually.
+  const widgetBody = $(".widget-episodeBody");
+  if (widgetBody.length > 0) {
+      // Get all paragraphs inside
+      const paragraphs = widgetBody.find("p");
+      if (paragraphs.length > 0) {
+          content = paragraphs.map((i, el) => {
+              const text = $(el).text();
+              // Preserve empty lines which are important in novels
+              return text.trim() === "" ? "<br/>" : `<p>${text}</p>`;
+          }).get().join("\n");
+      } else {
+          // If no p tags, maybe it's just text nodes or br tags?
+          content = widgetBody.html() || "";
+      }
+  }
+
+  // Strategy 2: User suggested selector #contentMain-inner > div > div > div
+  if (!content) {
+      const userSelector = $("#contentMain-inner > div > div > div");
+      if (userSelector.length > 0) {
+           const paragraphs = userSelector.find("p");
+           if (paragraphs.length > 0) {
+              content = paragraphs.map((i, el) => {
+                  const text = $(el).text();
+                  return text.trim() === "" ? "<br/>" : `<p>${text}</p>`;
+              }).get().join("\n");
+           } else {
+               content = userSelector.html() || "";
+           }
+      }
+  }
+
+  // Strategy 3: Broad search for the longest text block
+  if (!content) {
+      console.log("[DEBUG] Strategies 1 & 2 failed. Trying broad search.");
+      // Find the div with the most text
+      let maxLen = 0;
+      let bestDiv = null;
+      $("div").each((i, el) => {
+          const textLen = $(el).text().length;
+          // Avoid selecting the whole page wrapper
+          if (textLen > maxLen && textLen < 50000 && $(el).find("div").length < 5) {
+              maxLen = textLen;
+              bestDiv = el;
+          }
+      });
+      
+      if (bestDiv) {
+          console.log("[DEBUG] Found best div by text length");
+          const paragraphs = $(bestDiv).find("p");
+          if (paragraphs.length > 0) {
+              content = paragraphs.map((i, el) => `<p>${$(el).text()}</p>`).get().join("\n");
+          } else {
+              content = $(bestDiv).html() || "";
+          }
+      }
+  }
+
+  if (!content) {
+    console.error(`[ERROR] Could not find content for ${url}`);
+    // Debug log - print more structure
+    console.log("HTML Structure (body):", $("body").html()?.substring(0, 1000));
+  } else {
+    console.log(`[DEBUG] Content found, length: ${content.length}`);
+  }
+
   const nextHref = $(nextLinkSelector).attr("href");
 
   return {
@@ -92,7 +174,8 @@ async function handleKakuyomuEpisode(url: string, userAgent: string) {
 async function handleNarouEpisode(url: string, userAgent: string) {
   console.log(`[INFO] Fetching Narou episode: ${url}`);
   const response = await fetch(url, { headers: { "User-Agent": userAgent } });
-  if (!response.ok) throw new Error(`Failed to fetch episode: ${response.status}`);
+  if (!response.ok)
+    throw new Error(`Failed to fetch episode: ${response.status}`);
 
   const html = await response.text();
   const $ = cheerio.load(html);
@@ -102,7 +185,9 @@ async function handleNarouEpisode(url: string, userAgent: string) {
   if (!title) title = $("h1").text().trim();
   if (!title) title = "Episode";
 
-  let content = $("body > div.l-container > main > article > div.p-novel__body").html();
+  let content = $(
+    "body > div.l-container > main > article > div.p-novel__body"
+  ).html();
   if (!content) content = $("div.novel_view").html();
   if (!content) throw new Error("Could not find content");
 
@@ -110,49 +195,49 @@ async function handleNarouEpisode(url: string, userAgent: string) {
   // Python:
   // Ep 1: body > div.l-container > main > article > div:nth-of-type(1) > a:nth-of-type(2)
   // Ep N: body > div.l-container > main > article > div:nth-of-type(1) > a:nth-of-type(3)
-  
+
   // We can try to find the link that contains "次" (Next) or use the specific selectors.
-  // Let's try to be a bit more robust by looking for the "next" navigation link class if possible, 
+  // Let's try to be a bit more robust by looking for the "next" navigation link class if possible,
   // but Narou structure is old.
   // The Python script relies on position.
-  
+
   // Let's try to find the "bn" (before/next) div.
   // Usually <div class="novel_bn"> or similar.
   // But the Python script uses `div:nth-of-type(1)` inside article.
-  
+
   // Let's try to find all links in the top nav and see which one points to next.
   // Usually the structure is [Before] [Table of Contents] [Next]
-  
+
   let nextUrl: string | null = null;
-  
+
   // Try to find a link that looks like a next link
   const links = $("div.novel_bn").first().find("a");
   // If we have 2 links, it's usually [Top] [Next] (for ep 1)
   // If we have 3 links, it's [Prev] [Top] [Next]
-  
+
   // However, the Python script uses `div:nth-of-type(1)` which might be the top nav.
   // Let's stick to the Python script's logic but adapted for Cheerio.
-  
+
   // Note: Cheerio nth-of-type is 1-indexed.
   const topNav = $("body > div.l-container > main > article > div").first();
   const navLinks = topNav.find("a");
-  
+
   let nextHref: string | undefined;
-  
+
   // Check if the last link text contains "次"
   const lastLink = navLinks.last();
   if (lastLink.text().includes("次")) {
-      nextHref = lastLink.attr("href");
+    nextHref = lastLink.attr("href");
   } else {
-      // Fallback to position
-      // If 2 links, 2nd is likely next (if 1st is TOC)
-      // If 3 links, 3rd is likely next
-      if (navLinks.length >= 2) {
-          // Check if it's not "前" (Prev)
-          if (!lastLink.text().includes("前")) {
-             nextHref = lastLink.attr("href");
-          }
+    // Fallback to position
+    // If 2 links, 2nd is likely next (if 1st is TOC)
+    // If 3 links, 3rd is likely next
+    if (navLinks.length >= 2) {
+      // Check if it's not "前" (Prev)
+      if (!lastLink.text().includes("前")) {
+        nextHref = lastLink.attr("href");
       }
+    }
   }
 
   if (nextHref) {
@@ -182,35 +267,43 @@ export async function POST(request: Request) {
 
     // Detect platform if not provided
     if (!platform) {
-        if (url && url.includes("syosetu.com")) platform = "narou";
-        else if (url && url.includes("kakuyomu.jp")) platform = "kakuyomu";
-        else if (bookId && bookId.startsWith("n")) platform = "narou"; // Simple heuristic
-        else platform = "kakuyomu"; // Default
+      if (url && url.includes("syosetu.com")) platform = "narou";
+      else if (url && url.includes("kakuyomu.jp")) platform = "kakuyomu";
+      else if (bookId && bookId.startsWith("n"))
+        platform = "narou"; // Simple heuristic
+      else platform = "kakuyomu"; // Default
     }
 
     if (type === "info") {
-      if (!bookId) return NextResponse.json({ error: "Book ID is required" }, { status: 400 });
-      
-      if (platform === "narou") {
-          const data = await handleNarouInfo(bookId, userAgent);
-          return NextResponse.json(data);
-      } else {
-          const data = await handleKakuyomuInfo(bookId, userAgent);
-          return NextResponse.json(data);
-      }
+      if (!bookId)
+        return NextResponse.json(
+          { error: "Book ID is required" },
+          { status: 400 }
+        );
 
+      if (platform === "narou") {
+        const data = await handleNarouInfo(bookId, userAgent);
+        return NextResponse.json(data);
+      } else {
+        const data = await handleKakuyomuInfo(bookId, userAgent);
+        return NextResponse.json(data);
+      }
     } else if (type === "episode") {
-      if (!url) return NextResponse.json({ error: "URL is required" }, { status: 400 });
+      if (!url)
+        return NextResponse.json({ error: "URL is required" }, { status: 400 });
 
       if (platform === "narou" || url.includes("syosetu.com")) {
-          const data = await handleNarouEpisode(url, userAgent);
-          return NextResponse.json(data);
+        const data = await handleNarouEpisode(url, userAgent);
+        return NextResponse.json(data);
       } else {
-          const data = await handleKakuyomuEpisode(url, userAgent);
-          return NextResponse.json(data);
+        const data = await handleKakuyomuEpisode(url, userAgent);
+        return NextResponse.json(data);
       }
     } else {
-      return NextResponse.json({ error: "Invalid request type" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid request type" },
+        { status: 400 }
+      );
     }
   } catch (error: any) {
     console.error("Error processing request:", error);
