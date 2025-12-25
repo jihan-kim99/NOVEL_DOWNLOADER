@@ -47,16 +47,38 @@ export default function Home() {
       }
 
       // Fallback: Fetch via CORS proxy
-      // Using allorigins.win
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(
-        fallbackUrl
-      )}&timestamp=${Date.now()}`;
-      const proxyRes = await fetch(proxyUrl);
-      if (!proxyRes.ok) throw new Error("Proxy fetch failed");
-      const proxyData = await proxyRes.json();
-      const html = proxyData.contents;
+      let html = "";
 
-      if (!html) throw new Error("No content from proxy");
+      // 1. Try corsproxy.io
+      try {
+        const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(
+          fallbackUrl
+        )}`;
+        const proxyRes = await fetch(proxyUrl);
+        if (proxyRes.ok) {
+          html = await proxyRes.text();
+        }
+      } catch (e) {
+        console.warn("corsproxy.io failed", e);
+      }
+
+      // 2. Try allorigins.win if first failed
+      if (!html) {
+        try {
+          const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(
+            fallbackUrl
+          )}&timestamp=${Date.now()}`;
+          const proxyRes = await fetch(proxyUrl);
+          if (proxyRes.ok) {
+            const proxyData = await proxyRes.json();
+            html = proxyData.contents;
+          }
+        } catch (e) {
+          console.warn("allorigins failed", e);
+        }
+      }
+
+      if (!html) throw new Error("All proxies failed to fetch content");
 
       // Send HTML to server for parsing
       const parseRes = await fetch("/api/download", {
