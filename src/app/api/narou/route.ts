@@ -39,10 +39,12 @@ async function handleNarouInfo(
   const infoUrl = `https://${domain}/${bookId}/`;
   console.log(`[INFO] Fetching Narou info from: ${infoUrl}`);
 
+  const novel18Cookie = process.env.NOVEL18_COOKIE || "novel18=1";
+
   const response = await fetch(infoUrl, {
     headers: {
       "User-Agent": userAgent,
-      Cookie: "over18=yes",
+      Cookie: `over18=yes; ${novel18Cookie}`,
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
       "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
@@ -187,7 +189,7 @@ async function handleNarouEpisode(url: string, userAgent: string) {
   const response = await fetch(url, {
     headers: {
       "User-Agent": userAgent,
-      Cookie: "over18=yes",
+      Cookie: `over18=yes; ${process.env.NOVEL18_COOKIE || "novel18=1"}`,
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
       "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
@@ -258,6 +260,45 @@ export async function POST(request: Request) {
         );
       const data = parseNarouEpisode(html, url);
       return NextResponse.json(data);
+    }
+
+    // Server-side fetch helper: fetch arbitrary Narou URL with proper headers
+    if (type === "fetch") {
+      if (!url)
+        return NextResponse.json({ error: "URL is required" }, { status: 400 });
+
+      const ua = body.userAgent || getRandomUserAgent();
+      const novel18Cookie =
+        body.novel18Cookie || process.env.NOVEL18_COOKIE || "novel18=1";
+
+      try {
+        const res = await fetch(url, {
+          headers: {
+            "User-Agent": ua,
+            Cookie: `over18=yes; ${novel18Cookie}`,
+            Accept:
+              "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+            "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
+            Referer: "https://syosetu.com/",
+          },
+        });
+
+        if (!res.ok) {
+          return NextResponse.json(
+            { error: `Fetch failed with ${res.status}` },
+            { status: res.status }
+          );
+        }
+
+        const text = await res.text();
+        return NextResponse.json({ html: text, url, userAgent: ua });
+      } catch (err: any) {
+        console.error("Server-side fetch error:", err);
+        return NextResponse.json(
+          { error: err.message || String(err) },
+          { status: 500 }
+        );
+      }
     }
 
     return NextResponse.json(
