@@ -61,13 +61,17 @@ function getHeaderCaseInsensitive(
   return undefined;
 }
 
-async function ensureSyosetuCookies(): Promise<void> {
-  if (syosetuCookiesSeeded) return;
+async function ensureSyosetuCookies(force = false): Promise<void> {
+  if (!force && syosetuCookiesSeeded) return;
   try {
     for (const url of [
       "https://syosetu.com",
       "https://ncode.syosetu.com",
       "https://novel18.syosetu.com",
+      "https://noc.syosetu.com",
+      "https://mnlt.syosetu.com",
+      "https://mid.syosetu.com",
+      "https://nl.syosetu.com",
     ]) {
       await CapacitorCookies.setCookie({
         url,
@@ -129,28 +133,77 @@ function responseDataToString(data: unknown): string {
   }
 }
 
+function mergeNativeCookies(
+  existing: string,
+  setCookieHeader?: string
+): string {
+  const map = new Map<string, string>();
+  const addRaw = (raw?: string, isSetCookie = false) => {
+    if (!raw) return;
+    const items = isSetCookie
+      ? raw.split(/,(?=\s*[^;=]+=[^;]+)/).map((s) => s.split(";")[0] || "")
+      : raw.split(";");
+    for (const part of items) {
+      const trimmed = part.trim();
+      const eq = trimmed.indexOf("=");
+      if (eq > 0) {
+        map.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1).trim());
+      }
+    }
+  };
+  addRaw(existing, false);
+  addRaw(setCookieHeader, true);
+  map.set("over18", "yes");
+  return Array.from(map.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function normalizeNativeSyosetuHttps(rawUrl: string): string {
+  try {
+    const u = new URL(rawUrl);
+    if (
+      u.protocol === "http:" &&
+      (u.hostname === "syosetu.com" || u.hostname.endsWith(".syosetu.com"))
+    ) {
+      u.protocol = "https:";
+    }
+    return u.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 async function nativeFetchNarouPage(
   initialUrl: string,
   signal?: AbortSignal,
   maxRedirects = 5
 ): Promise<{ status: number; html: string; finalUrl: string }> {
-  await ensureSyosetuCookies();
-  let currentUrl = initialUrl;
+  await ensureSyosetuCookies(false);
+  let currentUrl = normalizeNativeSyosetuHttps(initialUrl);
+  let cookieHeader = "over18=yes";
+  let referer = "https://syosetu.com/";
+  let retriedSameAgeAuth = false;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const res = await nativeRequestWithRetry(
       currentUrl,
       {
         "User-Agent": DESKTOP_UA,
-        Cookie: "over18=yes",
+        Cookie: cookieHeader,
         Accept:
           "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-        Referer: "https://syosetu.com/",
+        Referer: referer,
       },
       true,
       signal
     );
+
+    const setCookie = getHeaderCaseInsensitive(res.headers, "set-cookie");
+    if (setCookie) {
+      cookieHeader = mergeNativeCookies(cookieHeader, setCookie);
+    }
 
     if (!REDIRECT_STATUSES.has(res.status)) {
       return {
@@ -169,11 +222,27 @@ async function nativeFetchNarouPage(
       };
     }
 
-    let nextUrl = new URL(location, currentUrl).toString();
+    let nextUrl = normalizeNativeSyosetuHttps(
+      new URL(location, currentUrl).toString()
+    );
     if (nextUrl.includes("nl.syosetu.com/redirect/ageauth")) {
       const targetParam = new URL(nextUrl).searchParams.get("url");
-      if (targetParam && targetParam !== currentUrl) {
-        nextUrl = targetParam;
+      const unwrapped = targetParam
+        ? normalizeNativeSyosetuHttps(targetParam)
+        : null;
+      if (unwrapped && unwrapped !== currentUrl) {
+        referer = "https://nl.syosetu.com/";
+        nextUrl = unwrapped;
+      } else if (unwrapped && !retriedSameAgeAuth) {
+        retriedSameAgeAuth = true;
+        await ensureSyosetuCookies(true);
+        referer = "https://nl.syosetu.com/";
+        nextUrl = unwrapped;
+      } else {
+        throw new HttpStatusError(
+          "Syosetu R18 age verification blocked this request.",
+          403
+        );
       }
     }
 

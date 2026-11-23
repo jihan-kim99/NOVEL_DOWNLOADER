@@ -31,7 +31,7 @@ export function canonicalizeNarouDomain(domain?: string): string {
   return "ncode.syosetu.com";
 }
 
-function isAgeAuthPage(html: string, finalUrl?: string): boolean {
+export function isAgeAuthPage(html: string, finalUrl?: string): boolean {
   if (finalUrl && finalUrl.includes("nl.syosetu.com/redirect/ageauth")) {
     return true;
   }
@@ -39,9 +39,14 @@ function isAgeAuthPage(html: string, finalUrl?: string): boolean {
   const hasNovelStructure =
     $(".p-novel__title").length > 0 ||
     $(".p-novel__body").length > 0 ||
+    $(".p-novel__subtitle").length > 0 ||
+    $(".p-novel__text").length > 0 ||
     $(".p-eplist").length > 0 ||
     $("#novel_honbun").length > 0 ||
-    $(".novel_title").length > 0;
+    $(".novel_title").length > 0 ||
+    $(".novel_view").length > 0 ||
+    $(".novel_subtitle").length > 0 ||
+    $(".index_box").length > 0;
   if (hasNovelStructure) {
     return false;
   }

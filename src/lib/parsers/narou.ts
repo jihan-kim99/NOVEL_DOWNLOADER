@@ -85,6 +85,41 @@ export async function checkNarouUpdate(
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
+function extractSetCookiePairs(headers: Headers): string {
+  const rawList: string[] =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : (() => {
+          const single = headers.get("set-cookie");
+          return single ? single.split(/,(?=\s*[^;=]+=[^;]+)/) : [];
+        })();
+
+  const pairs: string[] = [];
+  for (const raw of rawList) {
+    const firstSegment = raw.split(";")[0]?.trim();
+    if (firstSegment && firstSegment.includes("=")) {
+      pairs.push(firstSegment);
+    }
+  }
+  return pairs.join("; ");
+}
+
+function normalizeSyosetuHttps(rawUrl: string): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "syosetu.com" ||
+        parsed.hostname.endsWith(".syosetu.com"))
+    ) {
+      parsed.protocol = "https:";
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
 export async function fetchNarouPage(
   initialUrl: string,
   userAgent: string,
@@ -108,13 +143,23 @@ export async function fetchNarouPage(
     return { response, finalUrl: resolvedUrl };
   }
 
-  let currentUrl = initialUrl;
+  let currentUrl = normalizeSyosetuHttps(initialUrl);
+  let accumulatedCookie = extraCookie || "";
+  let referer = "https://syosetu.com/";
+  let retriedSameAgeAuth = false;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const response = await fetchWithRetry(currentUrl, {
       redirect: "manual",
-      headers: buildNarouHeaders(userAgent, extraCookie),
+      headers: buildNarouHeaders(userAgent, accumulatedCookie, referer),
     });
+
+    const newCookies = extractSetCookiePairs(response.headers);
+    if (newCookies) {
+      accumulatedCookie = accumulatedCookie
+        ? `${accumulatedCookie}; ${newCookies}`
+        : newCookies;
+    }
 
     if (!REDIRECT_STATUSES.has(response.status)) {
       return { response, finalUrl: currentUrl };
@@ -125,14 +170,27 @@ export async function fetchNarouPage(
       return { response, finalUrl: currentUrl };
     }
 
-    let nextUrl = new URL(location, currentUrl).toString();
+    let nextUrl = normalizeSyosetuHttps(
+      new URL(location, currentUrl).toString()
+    );
 
     if (nextUrl.includes("nl.syosetu.com/redirect/ageauth")) {
       const targetParam = new URL(nextUrl).searchParams.get("url");
-      if (targetParam && targetParam !== currentUrl) {
-        nextUrl = targetParam;
+      const unwrapped = targetParam
+        ? normalizeSyosetuHttps(targetParam)
+        : null;
+      if (unwrapped && unwrapped !== currentUrl) {
+        referer = "https://nl.syosetu.com/";
+        nextUrl = unwrapped;
+      } else if (unwrapped && !retriedSameAgeAuth) {
+        retriedSameAgeAuth = true;
+        referer = "https://nl.syosetu.com/";
+        nextUrl = unwrapped;
       } else {
-        return { response, finalUrl: nextUrl };
+        throw new HttpStatusError(
+          "Syosetu R18 age verification blocked this request.",
+          403
+        );
       }
     }
 
@@ -151,7 +209,8 @@ export async function handleNarouInfo(
   bookId: string,
   userAgent: string,
   domain: string = "ncode.syosetu.com",
-  allowDomainFallback: boolean = true
+  allowDomainFallback: boolean = true,
+  extraCookie?: string
 ): Promise<NovelInfo> {
   const normalizedId = bookId.toLowerCase();
   const primaryDomain = canonicalizeNarouDomain(domain);
@@ -170,7 +229,11 @@ export async function handleNarouInfo(
     const infoUrl = `https://${currentDomain}/${normalizedId}/`;
     console.log(`[INFO] Fetching Narou info from: ${infoUrl}`);
 
-    const { response, finalUrl } = await fetchNarouPage(infoUrl, userAgent);
+    const { response, finalUrl } = await fetchNarouPage(
+      infoUrl,
+      userAgent,
+      extraCookie
+    );
 
     if (response.status === 404) {
       lastStatus = 404;
@@ -221,7 +284,7 @@ export async function handleNarouInfo(
           const pageNum = pageNums[idx];
           try {
             const tocUrl = `https://${resolvedDomain}/${normalizedId}/?p=${pageNum}`;
-            const tocRes = await fetchNarouPage(tocUrl, userAgent);
+            const tocRes = await fetchNarouPage(tocUrl, userAgent, extraCookie);
             if (tocRes.response.ok) {
               const tocHtml = await tocRes.response.text();
               const { episodeUrls } = extractNarouTocPage(
@@ -298,11 +361,16 @@ export async function handleNarouInfo(
 
 export async function handleNarouEpisode(
   url: string,
-  userAgent: string
+  userAgent: string,
+  extraCookie?: string
 ): Promise<Episode> {
   console.log(`[INFO] Fetching Narou episode: ${url}`);
 
-  const { response, finalUrl } = await fetchNarouPage(url, userAgent);
+  const { response, finalUrl } = await fetchNarouPage(
+    url,
+    userAgent,
+    extraCookie
+  );
 
   if (response.status === 403) {
     throw new HttpStatusError(

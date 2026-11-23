@@ -39,23 +39,47 @@ export function getRandomUserAgent(): string {
   return list[Math.floor(Math.random() * list.length)];
 }
 
+export function mergeSyosetuCookies(
+  ...cookieSources: Array<string | undefined | null>
+): string {
+  const cookieMap = new Map<string, string>();
+  for (const source of cookieSources) {
+    if (!source) continue;
+    for (const part of source.split(";")) {
+      const trimmed = part.trim();
+      if (!trimmed) continue;
+      const eqIdx = trimmed.indexOf("=");
+      if (eqIdx <= 0) continue;
+      const key = trimmed.slice(0, eqIdx).trim();
+      const val = trimmed.slice(eqIdx + 1).trim();
+      if (!key) continue;
+      cookieMap.set(key, val);
+    }
+  }
+  // Always enforce Syosetu R18 age confirmation cookie
+  cookieMap.set("over18", "yes");
+  return Array.from(cookieMap.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
 export function buildNarouHeaders(
   userAgent: string,
-  extraCookie?: string
+  extraCookie?: string,
+  referer: string = "https://syosetu.com/"
 ): Record<string, string> {
-  const cookieParts = ["over18=yes"];
-  const envCookie = extraCookie || process.env.NOVEL18_COOKIE;
-  if (envCookie) {
-    cookieParts.push(envCookie);
-  }
+  const cookieHeader = mergeSyosetuCookies(
+    process.env.NOVEL18_COOKIE,
+    extraCookie
+  );
 
   const headers: Record<string, string> = {
     "User-Agent": userAgent,
-    Cookie: cookieParts.join("; "),
+    Cookie: cookieHeader,
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-    Referer: "https://syosetu.com/",
+    Referer: referer,
     "Upgrade-Insecure-Requests": "1",
   };
 

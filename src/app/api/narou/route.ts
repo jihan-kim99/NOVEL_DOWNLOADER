@@ -42,7 +42,8 @@ export async function POST(request: Request) {
         bookId,
         userAgent,
         domain,
-        explicitDomain === false ? true : true
+        explicitDomain === false ? true : true,
+        body.novel18Cookie
       );
       return NextResponse.json(data);
     }
@@ -54,7 +55,11 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const data = await handleNarouEpisode(url, userAgent);
+      const data = await handleNarouEpisode(
+        url,
+        userAgent,
+        body.novel18Cookie
+      );
       return NextResponse.json(data);
     }
 
