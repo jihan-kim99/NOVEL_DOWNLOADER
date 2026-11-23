@@ -6,7 +6,18 @@ import {
 } from "@capacitor/core";
 import { Directory, Filesystem } from "@capacitor/filesystem";
 import { Share } from "@capacitor/share";
-import type { Episode, NovelInfo } from "../types";
+import type {
+  BrowseQueryParams,
+  BrowseResponse,
+  Episode,
+  NovelInfo,
+} from "../types";
+import {
+  buildKakuyomuBrowseUrl,
+  buildSyosetuBrowseUrl,
+  parseKakuyomuBrowseHtml,
+  parseSyosetuBrowseResponse,
+} from "./parsers/browse-parse";
 import {
   parseKakuyomuEpisode,
   parseKakuyomuInfo,
@@ -474,3 +485,61 @@ export async function nativeShareEpub(file: NativeSavedFile): Promise<void> {
     dialogTitle: "Open or Share EPUB",
   });
 }
+
+/**
+ * Fetches rankings or search results directly on-device via CapacitorHttp
+ * across Narou, Narou R18 (Nocturne/Moonlight/Midnight), and Kakuyomu.
+ */
+export async function nativeBrowseCatalog(
+  params: BrowseQueryParams,
+  signal?: AbortSignal
+): Promise<BrowseResponse> {
+  if (params.site === "kakuyomu") {
+    const url = buildKakuyomuBrowseUrl(params);
+    const res = await nativeRequestWithRetry(
+      url,
+      {
+        "User-Agent": DESKTOP_UA,
+        Accept:
+          "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+        Referer: "https://kakuyomu.jp/",
+      },
+      false,
+      signal
+    );
+
+    if (res.status < 200 || res.status >= 300) {
+      throw new HttpStatusError(
+        `Failed to fetch Kakuyomu catalog (HTTP ${res.status})`,
+        res.status
+      );
+    }
+
+    return parseKakuyomuBrowseHtml(responseDataToString(res.data), params);
+  }
+
+  const url = buildSyosetuBrowseUrl(params);
+  const res = await nativeRequestWithRetry(
+    url,
+    {
+      "User-Agent": DESKTOP_UA,
+      Accept: "application/json,text/plain,*/*",
+      "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
+    },
+    false,
+    signal
+  );
+
+  if (res.status < 200 || res.status >= 300) {
+    throw new HttpStatusError(
+      `Failed to fetch Syosetu catalog (HTTP ${res.status})`,
+      res.status
+    );
+  }
+
+  const raw =
+    typeof res.data === "string" ? JSON.parse(res.data) : res.data;
+  return parseSyosetuBrowseResponse(raw, params);
+}
+
