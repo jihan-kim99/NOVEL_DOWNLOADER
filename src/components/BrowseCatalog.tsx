@@ -8,18 +8,21 @@ import {
   SITE_META_MAP,
   SUPPORTED_SITES,
 } from "../lib/sites";
+import { buildLibraryNovelId } from "../lib/library-storage";
 import type {
   BrowseNovelItem,
   BrowseResponse,
   BrowseSiteId,
   BrowseSort,
   BrowseStatusFilter,
+  LibraryNovel,
 } from "../types";
 
 interface BrowseCatalogProps {
   nativeMode: boolean;
   isDownloading: boolean;
   queuedUrls: Set<string>;
+  libraryById: Map<string, LibraryNovel>;
   onDownloadNovel: (url: string, title?: string) => void;
   onQueueNovel: (novel: {
     url: string;
@@ -41,6 +44,7 @@ export default function BrowseCatalog({
   nativeMode,
   isDownloading,
   queuedUrls,
+  libraryById,
   onDownloadNovel,
   onQueueNovel,
   onOpenInBrowser,
@@ -361,6 +365,13 @@ export default function BrowseCatalog({
             const key = `${item.site}-${item.id}`;
             const isExpanded = expandedIds.has(key);
             const isQueued = queuedUrls.has(item.url);
+            const libraryEntry = libraryById.get(
+              buildLibraryNovelId(item.platform, item.id)
+            );
+            const catalogNewEpisodes =
+              libraryEntry && typeof item.episodeCount === "number"
+                ? Math.max(0, item.episodeCount - libraryEntry.downloadedEpisodes)
+                : libraryEntry?.newEpisodeCount || 0;
             const isLongSynopsis = item.synopsis.length > 160;
             const displayedSynopsis =
               isExpanded || !isLongSynopsis
@@ -412,6 +423,19 @@ export default function BrowseCatalog({
                       {item.genreLabel && (
                         <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">
                           {item.genreLabel}
+                        </span>
+                      )}
+                      {libraryEntry && (
+                        <span
+                          className={`px-1.5 py-0.5 rounded font-semibold border ${
+                            catalogNewEpisodes > 0
+                              ? "bg-amber-50 text-amber-800 border-amber-300"
+                              : "bg-emerald-50 text-emerald-700 border-emerald-200"
+                          }`}
+                        >
+                          {catalogNewEpisodes > 0
+                            ? `In Library • +${catalogNewEpisodes} new`
+                            : `✓ In Library (${libraryEntry.downloadedEpisodes} eps)`}
                         </span>
                       )}
                     </div>
@@ -495,9 +519,17 @@ export default function BrowseCatalog({
                     type="button"
                     disabled={isDownloading}
                     onClick={() => onDownloadNovel(item.url, item.title)}
-                    className="flex-1 min-w-[120px] px-3 py-2 rounded-lg bg-gradient-to-r from-blue-600 to-purple-600 text-white text-xs font-bold hover:opacity-90 transition-opacity disabled:opacity-50 cursor-pointer shadow-xs"
+                    className={`flex-1 min-w-[120px] px-3 py-2 rounded-lg text-white text-xs font-bold hover:opacity-90 transition-opacity disabled:opacity-50 cursor-pointer shadow-xs ${
+                      catalogNewEpisodes > 0
+                        ? "bg-gradient-to-r from-emerald-600 to-teal-600"
+                        : "bg-gradient-to-r from-blue-600 to-purple-600"
+                    }`}
                   >
-                    ⬇ Download EPUB
+                    {catalogNewEpisodes > 0
+                      ? `⬇ Update EPUB (+${catalogNewEpisodes})`
+                      : libraryEntry
+                      ? "↻ Update / Re-download"
+                      : "⬇ Download EPUB"}
                   </button>
                   <button
                     type="button"

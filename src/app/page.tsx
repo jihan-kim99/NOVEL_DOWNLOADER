@@ -1,16 +1,21 @@
 "use client";
 
+import { saveAs } from "file-saver";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import BrowseCatalog from "../components/BrowseCatalog";
 import InternalBrowserTab from "../components/InternalBrowserTab";
+import NovelLibrary from "../components/NovelLibrary";
 import {
   isNativeApp,
+  nativeCheckNovelUpdate,
+  nativeDeleteCachedEpub,
   nativeFetchKakuyomuEpisode,
   nativeFetchKakuyomuInfo,
   nativeFetchNarouEpisode,
   nativeFetchNarouInfo,
   nativeSaveEpub,
   nativeShareEpub,
+  nativeShareLibraryEpub,
   type NativeSavedFile,
 } from "../lib/capacitor-native";
 import {
@@ -21,12 +26,31 @@ import {
 } from "../lib/epub";
 import { openInternalBrowser } from "../lib/internal-browser";
 import {
+  buildCanonicalNovelUrl,
+  buildLibraryNovelId,
+  deleteLibraryAssets,
+  formatSiteLabelFromDomain,
+  getLibraryChapters,
+  getLibraryEpub,
+  loadLibraryNovels,
+  saveLibraryAssets,
+  saveLibraryNovels,
+  upsertLibraryNovel,
+} from "../lib/library-storage";
+import {
   CloudBlockError,
   fetchWithFallback,
   probeBrowserBridge,
 } from "../lib/narou-client";
 import { parseNovelInput } from "../lib/url-parser";
-import type { Episode, NovelInfo, QueuedNovel } from "../types";
+import type {
+  CachedEpisode,
+  Episode,
+  LibraryNovel,
+  NovelInfo,
+  NovelUpdateCheckResult,
+  QueuedNovel,
+} from "../types";
 
 declare global {
   interface Window {
@@ -34,9 +58,13 @@ declare global {
   }
 }
 
-type AppTab = "catalog" | "browser" | "downloader";
+type AppTab = "catalog" | "library" | "browser" | "downloader";
 
 const QUEUE_STORAGE_KEY = "novel_downloader_queue_v1";
+
+function normalizeEpisodeUrlKey(url: string): string {
+  return url.trim().replace(/\/+$/, "").toLowerCase();
+}
 
 export default function Home() {
   const [activeTab, setActiveTab] = useState<AppTab>("catalog");
@@ -49,6 +77,12 @@ export default function Home() {
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [totalEpisodes, setTotalEpisodes] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [activeDownloadNovelId, setActiveDownloadNovelId] = useState<
+    string | null
+  >(null);
+  const [lastSavedLibraryId, setLastSavedLibraryId] = useState<string | null>(
+    null
+  );
   const [batchProgress, setBatchProgress] = useState<{
     current: number;
     total: number;
@@ -61,6 +95,12 @@ export default function Home() {
   const [showBypassHelp, setShowBypassHelp] = useState(false);
   const [lastBrowserUrl, setLastBrowserUrl] = useState<string | null>(null);
   const [queue, setQueue] = useState<QueuedNovel[]>([]);
+  const [library, setLibrary] = useState<LibraryNovel[]>([]);
+  const [checkingIds, setCheckingIds] = useState<Set<string>>(new Set());
+  const [checkingAllProgress, setCheckingAllProgress] = useState<{
+    current: number;
+    total: number;
+  } | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [readyEpub, setReadyEpub] = useState<{
     url: string;
@@ -70,18 +110,46 @@ export default function Home() {
   const [nativeSaved, setNativeSaved] = useState<NativeSavedFile | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+  const checkAllAbortRef = useRef<AbortController | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const loadingRef = useRef(false);
+  const libraryRef = useRef<LibraryNovel[]>([]);
 
   useEffect(() => {
     loadingRef.current = loading;
   }, [loading]);
+
+  useEffect(() => {
+    libraryRef.current = library;
+  }, [library]);
 
   const showToast = useCallback((msg: string) => {
     setToastMessage(msg);
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     toastTimerRef.current = setTimeout(() => setToastMessage(null), 2600);
   }, []);
+
+  const persistLibraryEntry = useCallback((entry: LibraryNovel) => {
+    setLibrary((prev) => {
+      const updated = upsertLibraryNovel(prev, entry);
+      saveLibraryNovels(updated);
+      return updated;
+    });
+  }, []);
+
+  const patchLibraryEntry = useCallback(
+    (id: string, patch: Partial<LibraryNovel>) => {
+      setLibrary((prev) => {
+        const idx = prev.findIndex((item) => item.id === id);
+        if (idx === -1) return prev;
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], ...patch };
+        saveLibraryNovels(updated);
+        return updated;
+      });
+    },
+    []
+  );
 
   const addToQueue = useCallback(
     (item: {
@@ -149,6 +217,16 @@ export default function Home() {
     [queue]
   );
 
+  const libraryById = useMemo(
+    () => new Map(library.map((item) => [item.id, item])),
+    [library]
+  );
+
+  const libraryUpdatesCount = useMemo(
+    () => library.filter((item) => item.hasUpdate).length,
+    [library]
+  );
+
   const attachBookmarkletHref = (el: HTMLAnchorElement | null) => {
     if (!el || typeof window === "undefined") return;
     const code = `javascript:(function(){var s=document.createElement('script');s.src='${window.location.origin}/bookmarklet.js?t='+Date.now();document.head.appendChild(s);})();`;
@@ -172,6 +250,14 @@ export default function Home() {
       }
     } catch {
       // Ignore malformed storage
+    }
+
+    // Load persisted downloaded novels library
+    const savedLibrary = loadLibraryNovels();
+    if (savedLibrary.length > 0) {
+      queueMicrotask(() => {
+        if (active) setLibrary(savedLibrary);
+      });
     }
 
     const onBrowserQueue = (event: Event) => {
@@ -288,13 +374,17 @@ export default function Home() {
   };
 
   /**
-   * Core single-novel download execution. Returns true on success, false on error/cancel.
+   * Core single-novel download execution.
+   * Automatically saves/updates the novel in the Library (metadata + cached EPUB & chapters).
+   * When forceFull is false and cached chapters match the TOC, fetches only new episodes!
    */
   const executeNovelDownload = useCallback(
     async (
       rawUrl: string,
-      controller: AbortController
+      controller: AbortController,
+      options?: { forceFull?: boolean }
     ): Promise<"success" | "cancelled" | "error"> => {
+      const forceFull = Boolean(options?.forceFull);
       setIsError(false);
       setCloudBlocked(false);
       setStatus("Initializing...");
@@ -303,6 +393,7 @@ export default function Home() {
       setDownloadedCount(0);
       setTotalEpisodes(null);
       setNativeSaved(null);
+      setLastSavedLibraryId(null);
       setReadyEpub((prev) => {
         if (prev) URL.revokeObjectURL(prev.url);
         return null;
@@ -312,6 +403,8 @@ export default function Home() {
         const parsed = parseNovelInput(rawUrl);
         const { platform, bookId, explicitDomain, siteLabel } = parsed;
         let domain = parsed.domain;
+        const novelId = buildLibraryNovelId(platform, bookId);
+        setActiveDownloadNovelId(novelId);
 
         const apiEndpoint =
           platform === "narou" ? "/api/narou" : "/api/kakuyomu";
@@ -372,6 +465,7 @@ export default function Home() {
 
         const { zip, oebps } = initializeEpub();
         const chapters: Chapter[] = [];
+        const cachedEpisodesToSave: CachedEpisode[] = [];
 
         const fetchSingleEpisode = async (epUrl: string): Promise<Episode> => {
           if (nativeMode) {
@@ -405,41 +499,95 @@ export default function Home() {
         if (episodeUrls && episodeUrls.length > 0) {
           const total = episodeUrls.length;
           setTotalEpisodes(total);
-          const workerCount = Math.max(1, Math.min(concurrency, total));
-          const orderedEpisodes: Array<Episode | null> = new Array(total).fill(
-            null
-          );
-          let nextIndex = 0;
-          let completed = 0;
 
-          setStatus(
-            `Downloading ${total} episodes (${workerCount}x concurrent)...`
-          );
-
-          const worker = async (workerId: number) => {
-            if (workerId > 0) {
-              await new Promise((r) => setTimeout(r, workerId * 60));
-            }
-            while (true) {
-              if (controller.signal.aborted) {
-                throw new DOMException("Download cancelled", "AbortError");
+          // Check whether we can reuse already-cached chapters for a fast incremental update
+          const cachedMap = new Map<string, CachedEpisode>();
+          if (!forceFull) {
+            const existingCached = await getLibraryChapters(novelId);
+            if (existingCached) {
+              for (const ep of existingCached) {
+                if (ep.url && ep.content) {
+                  cachedMap.set(normalizeEpisodeUrlKey(ep.url), ep);
+                }
               }
-              const idx = nextIndex++;
-              if (idx >= total) return;
-
-              const ep = await fetchSingleEpisode(episodeUrls[idx]);
-              orderedEpisodes[idx] = ep;
-              completed++;
-              setDownloadedCount(completed);
-              setStatus(
-                `Downloading ${completed} / ${total} episodes (${workerCount}x)...`
-              );
             }
-          };
+          }
 
-          await Promise.all(
-            Array.from({ length: workerCount }, (_, wIdx) => worker(wIdx))
-          );
+          const orderedEpisodes: Array<CachedEpisode | null> = new Array(
+            total
+          ).fill(null);
+          const missingIndices: number[] = [];
+
+          for (let i = 0; i < total; i++) {
+            const epUrl = episodeUrls[i];
+            const cached = cachedMap.get(normalizeEpisodeUrlKey(epUrl));
+            if (cached) {
+              orderedEpisodes[i] = {
+                url: epUrl,
+                title: cached.title,
+                content: cached.content,
+              };
+            } else {
+              missingIndices.push(i);
+            }
+          }
+
+          const reusedCount = total - missingIndices.length;
+          let completed = reusedCount;
+          if (reusedCount > 0) {
+            setDownloadedCount(completed);
+          }
+
+          if (missingIndices.length > 0) {
+            const workerCount = Math.max(
+              1,
+              Math.min(concurrency, missingIndices.length)
+            );
+            let cursor = 0;
+
+            setStatus(
+              reusedCount > 0
+                ? `Fast update: downloading ${missingIndices.length} new episodes (${reusedCount} cached)...`
+                : `Downloading ${total} episodes (${workerCount}x concurrent)...`
+            );
+
+            const worker = async (workerId: number) => {
+              if (workerId > 0) {
+                await new Promise((r) => setTimeout(r, workerId * 60));
+              }
+              while (true) {
+                if (controller.signal.aborted) {
+                  throw new DOMException("Download cancelled", "AbortError");
+                }
+                const slot = cursor++;
+                if (slot >= missingIndices.length) return;
+                const idx = missingIndices[slot];
+                const epUrl = episodeUrls[idx];
+
+                const ep = await fetchSingleEpisode(epUrl);
+                orderedEpisodes[idx] = {
+                  url: epUrl,
+                  title: ep.title,
+                  content: ep.content,
+                };
+                completed++;
+                setDownloadedCount(completed);
+                setStatus(
+                  reusedCount > 0
+                    ? `Updating ${completed} / ${total} episodes (${missingIndices.length} new)...`
+                    : `Downloading ${completed} / ${total} episodes (${workerCount}x)...`
+                );
+              }
+            };
+
+            await Promise.all(
+              Array.from({ length: workerCount }, (_, wIdx) => worker(wIdx))
+            );
+          } else {
+            setStatus(
+              `All ${total} episodes already cached — rebuilding EPUB...`
+            );
+          }
 
           let chapterNum = 1;
           for (const ep of orderedEpisodes) {
@@ -447,6 +595,7 @@ export default function Home() {
             const fileName = `chapter_${chapterNum}.xhtml`;
             oebps.file(fileName, buildChapterXhtml(ep.title, ep.content));
             chapters.push({ title: ep.title, fileName });
+            cachedEpisodesToSave.push(ep);
             chapterNum++;
           }
         } else {
@@ -477,6 +626,11 @@ export default function Home() {
             const fileName = `chapter_${episodeNum}.xhtml`;
             oebps.file(fileName, buildChapterXhtml(ep.title, ep.content));
             chapters.push({ title: ep.title, fileName });
+            cachedEpisodesToSave.push({
+              url: currentUrl,
+              title: ep.title,
+              content: ep.content,
+            });
 
             setDownloadedCount(episodeNum);
             currentUrl = ep.nextUrl;
@@ -516,24 +670,86 @@ export default function Home() {
           !nativeMode
         );
 
+        let savedNativeFile: NativeSavedFile | undefined;
         if (nativeMode) {
           setStatus("Saving EPUB to device...");
           const saved = await nativeSaveEpub(
             generated.blob,
             generated.fileName
           );
+          savedNativeFile = saved;
           setNativeSaved(saved);
-          setStatus(
-            `Saved to ${saved.documentsPath} (${chapters.length} episodes)`
-          );
         } else {
           setReadyEpub({
             url: URL.createObjectURL(generated.blob),
             blob: generated.blob,
             fileName: generated.fileName,
           });
-          setStatus(`Download complete! (${chapters.length} episodes saved)`);
         }
+
+        // Persist EPUB & chapters to Library automatically
+        const assetResult = await saveLibraryAssets(
+          novelId,
+          { blob: generated.blob, fileName: generated.fileName },
+          cachedEpisodesToSave
+        );
+
+        const now = Date.now();
+        const existingEntry = libraryRef.current.find((n) => n.id === novelId);
+        const resolvedStatus =
+          info.status ||
+          (info.isShortStory ? "short" : undefined) ||
+          existingEntry?.status ||
+          "unknown";
+
+        const libraryEntry: LibraryNovel = {
+          id: novelId,
+          platform,
+          bookId: platform === "narou" ? bookId.toLowerCase() : bookId,
+          domain,
+          siteLabel: formatSiteLabelFromDomain(platform, domain),
+          url: buildCanonicalNovelUrl(platform, domain, bookId),
+          title: info.title,
+          author: info.author || existingEntry?.author,
+          fileName: generated.fileName,
+          fileSize: generated.blob.size,
+          downloadedEpisodes: chapters.length,
+          latestKnownEpisodes: Math.max(
+            chapters.length,
+            info.totalEpisodes || chapters.length
+          ),
+          hasUpdate: false,
+          newEpisodeCount: 0,
+          status: resolvedStatus,
+          isShortStory: info.isShortStory ?? existingEntry?.isShortStory,
+          downloadedAt: existingEntry?.downloadedAt ?? now,
+          updatedAt: now,
+          lastCheckedAt: now,
+          remoteUpdatedAt:
+            info.remoteUpdatedAt || existingEntry?.remoteUpdatedAt,
+          lastCheckError: undefined,
+          nativeFile: savedNativeFile || existingEntry?.nativeFile,
+          hasCachedEpub: assetResult.savedEpub,
+          hasCachedChapters: assetResult.savedChapters,
+        };
+
+        persistLibraryEntry(libraryEntry);
+        setLastSavedLibraryId(novelId);
+
+        if (savedNativeFile) {
+          setStatus(
+            `Saved to Library & ${savedNativeFile.documentsPath} (${chapters.length} episodes)`
+          );
+        } else {
+          setStatus(
+            `Download complete! Saved to Library (${chapters.length} episodes)`
+          );
+        }
+        showToast(
+          existingEntry
+            ? `Updated "${info.title}" in Library`
+            : `Saved "${info.title}" to Library`
+        );
         return "success";
       } catch (error: unknown) {
         if (
@@ -554,13 +770,26 @@ export default function Home() {
         setStatus(`Error: ${message}`);
         setIsError(true);
         return "error";
+      } finally {
+        setActiveDownloadNovelId(null);
       }
     },
-    [bridgeVersion, concurrency, nativeMode, useBridgeForAll]
+    [
+      bridgeVersion,
+      concurrency,
+      nativeMode,
+      persistLibraryEntry,
+      showToast,
+      useBridgeForAll,
+    ]
   );
 
   const startSingleDownload = useCallback(
-    async (targetUrl: string, switchToDownloader = true) => {
+    async (
+      targetUrl: string,
+      switchToDownloader = true,
+      options?: { forceFull?: boolean }
+    ) => {
       if (loadingRef.current) {
         showToast("A download is already running — added to queue instead.");
         addToQueue({ url: targetUrl });
@@ -578,7 +807,11 @@ export default function Home() {
       abortControllerRef.current = controller;
 
       try {
-        const outcome = await executeNovelDownload(targetUrl, controller);
+        const outcome = await executeNovelDownload(
+          targetUrl,
+          controller,
+          options
+        );
         if (outcome === "success") {
           removeFromQueue(targetUrl);
         }
@@ -621,7 +854,7 @@ export default function Home() {
 
       if (!controller.signal.aborted && snapshot.length > 1) {
         setStatus(
-          `Batch finished: ${succeeded} / ${snapshot.length} novels downloaded.`
+          `Batch finished: ${succeeded} / ${snapshot.length} novels saved to Library.`
         );
       }
     } finally {
@@ -630,6 +863,376 @@ export default function Home() {
       setLoading(false);
     }
   };
+
+  const fetchNovelUpdateInfo = useCallback(
+    async (
+      novel: LibraryNovel,
+      signal?: AbortSignal
+    ): Promise<NovelUpdateCheckResult> => {
+      if (nativeMode) {
+        return nativeCheckNovelUpdate(
+          novel.platform,
+          novel.bookId,
+          novel.domain,
+          signal
+        );
+      }
+
+      try {
+        const res = await fetch("/api/library/check-update", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal,
+          body: JSON.stringify({
+            platform: novel.platform,
+            bookId: novel.bookId,
+            domain: novel.domain,
+          }),
+        });
+
+        if (res.ok) {
+          return (await res.json()) as NovelUpdateCheckResult;
+        }
+
+        const errData = await res.json().catch(() => null);
+        const errMessage =
+          (errData && typeof errData.error === "string" && errData.error) ||
+          `Update check failed (HTTP ${res.status})`;
+
+        // If Browser Helper is available, fall back to direct browser fetch
+        if (bridgeVersion) {
+          const apiEndpoint =
+            novel.platform === "narou" ? "/api/narou" : "/api/kakuyomu";
+          const info = await fetchWithFallback<NovelInfo>(
+            apiEndpoint,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              signal,
+              body: JSON.stringify({
+                type: "info",
+                bookId: novel.bookId,
+                platform: novel.platform,
+                domain: novel.domain,
+                explicitDomain: true,
+              }),
+            },
+            "parse-info",
+            novel.url,
+            () => {},
+            true,
+            true
+          );
+
+          return {
+            title: info.title,
+            author: info.author,
+            domain: info.domain || novel.domain,
+            totalEpisodes:
+              info.totalEpisodes ||
+              info.episodeUrls?.length ||
+              (info.isShortStory ? 1 : novel.downloadedEpisodes),
+            status: info.status || (info.isShortStory ? "short" : undefined),
+            isShortStory: info.isShortStory,
+            remoteUpdatedAt: info.remoteUpdatedAt,
+          };
+        }
+
+        throw new Error(errMessage);
+      } catch (err) {
+        if (
+          (err instanceof DOMException || err instanceof Error) &&
+          err.name === "AbortError"
+        ) {
+          throw err;
+        }
+        throw err instanceof Error
+          ? err
+          : new Error("Failed to check for updates");
+      }
+    },
+    [bridgeVersion, nativeMode]
+  );
+
+  const checkSingleNovelUpdate = useCallback(
+    async (
+      novel: LibraryNovel,
+      silent = false,
+      signal?: AbortSignal
+    ): Promise<{ ok: boolean; hasUpdate: boolean; newCount: number }> => {
+      setCheckingIds((prev) => {
+        const next = new Set(prev);
+        next.add(novel.id);
+        return next;
+      });
+
+      try {
+        const result = await fetchNovelUpdateInfo(novel, signal);
+        const now = Date.now();
+        const latestTotal = Math.max(
+          novel.downloadedEpisodes,
+          result.totalEpisodes || 0
+        );
+        const newEpisodeCount = Math.max(
+          0,
+          latestTotal - novel.downloadedEpisodes
+        );
+        const hasUpdate = newEpisodeCount > 0;
+        const resolvedDomain = result.domain || novel.domain;
+
+        patchLibraryEntry(novel.id, {
+          title: result.title || novel.title,
+          author: result.author || novel.author,
+          domain: resolvedDomain,
+          siteLabel: formatSiteLabelFromDomain(novel.platform, resolvedDomain),
+          url: buildCanonicalNovelUrl(
+            novel.platform,
+            resolvedDomain,
+            novel.bookId
+          ),
+          latestKnownEpisodes: latestTotal,
+          hasUpdate,
+          newEpisodeCount,
+          status:
+            result.status && result.status !== "unknown"
+              ? result.status
+              : novel.status,
+          isShortStory: result.isShortStory ?? novel.isShortStory,
+          remoteUpdatedAt: result.remoteUpdatedAt || novel.remoteUpdatedAt,
+          lastCheckedAt: now,
+          lastCheckError: undefined,
+        });
+
+        if (!silent) {
+          showToast(
+            hasUpdate
+              ? `+${newEpisodeCount} new ${
+                  newEpisodeCount === 1 ? "episode" : "episodes"
+                } found for "${result.title || novel.title}"!`
+              : `"${result.title || novel.title}" is up to date (${novel.downloadedEpisodes} eps)`
+          );
+        }
+
+        return { ok: true, hasUpdate, newCount: newEpisodeCount };
+      } catch (err) {
+        if (
+          (err instanceof DOMException || err instanceof Error) &&
+          err.name === "AbortError"
+        ) {
+          return { ok: false, hasUpdate: false, newCount: 0 };
+        }
+        const message =
+          err instanceof Error ? err.message : "Failed to check update";
+        patchLibraryEntry(novel.id, {
+          lastCheckError: message,
+        });
+        if (!silent) {
+          showToast(`Check failed: ${message}`);
+        }
+        return { ok: false, hasUpdate: false, newCount: 0 };
+      } finally {
+        setCheckingIds((prev) => {
+          const next = new Set(prev);
+          next.delete(novel.id);
+          return next;
+        });
+      }
+    },
+    [fetchNovelUpdateInfo, patchLibraryEntry, showToast]
+  );
+
+  const handleCheckAllUpdates = useCallback(async () => {
+    const snapshot = [...libraryRef.current];
+    if (snapshot.length === 0 || checkAllAbortRef.current) return;
+
+    const controller = new AbortController();
+    checkAllAbortRef.current = controller;
+    setCheckingAllProgress({ current: 0, total: snapshot.length });
+
+    let cursor = 0;
+    let completed = 0;
+    let updatedNovels = 0;
+    let totalNewEps = 0;
+    let failedCount = 0;
+
+    const workerCount = Math.min(3, snapshot.length);
+    const worker = async () => {
+      while (true) {
+        if (controller.signal.aborted) return;
+        const idx = cursor++;
+        if (idx >= snapshot.length) return;
+        const target = snapshot[idx];
+        const res = await checkSingleNovelUpdate(target, true, controller.signal);
+        if (controller.signal.aborted) return;
+        if (res.ok) {
+          if (res.hasUpdate) {
+            updatedNovels++;
+            totalNewEps += res.newCount;
+          }
+        } else {
+          failedCount++;
+        }
+        completed++;
+        setCheckingAllProgress({ current: completed, total: snapshot.length });
+      }
+    };
+
+    try {
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+      if (controller.signal.aborted) {
+        showToast("Update check cancelled.");
+      } else if (updatedNovels > 0) {
+        showToast(
+          `Found ${totalNewEps} new ${
+            totalNewEps === 1 ? "episode" : "episodes"
+          } across ${updatedNovels} ${
+            updatedNovels === 1 ? "novel" : "novels"
+          }!`
+        );
+      } else if (failedCount > 0) {
+        showToast(
+          `Checked ${snapshot.length - failedCount}/${snapshot.length} novels (${failedCount} failed).`
+        );
+      } else {
+        showToast(
+          `All ${snapshot.length} ${
+            snapshot.length === 1 ? "novel is" : "novels are"
+          } up to date!`
+        );
+      }
+    } finally {
+      checkAllAbortRef.current = null;
+      setCheckingAllProgress(null);
+    }
+  }, [checkSingleNovelUpdate, showToast]);
+
+  const handleCancelCheckAll = useCallback(() => {
+    checkAllAbortRef.current?.abort();
+  }, []);
+
+  const handleUpdateNovel = useCallback(
+    async (novel: LibraryNovel, forceFull = false) => {
+      await startSingleDownload(novel.url, true, { forceFull });
+    },
+    [startSingleDownload]
+  );
+
+  const handleUpdateAllOutdated = useCallback(async () => {
+    if (loadingRef.current) return;
+    const outdated = libraryRef.current.filter((n) => n.hasUpdate);
+    if (outdated.length === 0) return;
+
+    setActiveTab("downloader");
+    setLoading(true);
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
+    let succeeded = 0;
+    try {
+      for (let i = 0; i < outdated.length; i++) {
+        if (controller.signal.aborted) break;
+        const item = outdated[i];
+        setBatchProgress({ current: i + 1, total: outdated.length });
+        setInput(item.url);
+
+        const outcome = await executeNovelDownload(item.url, controller, {
+          forceFull: false,
+        });
+        if (outcome === "success") {
+          succeeded++;
+        } else if (outcome === "cancelled") {
+          break;
+        }
+      }
+
+      if (!controller.signal.aborted && outdated.length > 1) {
+        setStatus(
+          `Library updates finished: ${succeeded} / ${outdated.length} novels updated.`
+        );
+      }
+    } finally {
+      abortControllerRef.current = null;
+      setBatchProgress(null);
+      setLoading(false);
+    }
+  }, [executeNovelDownload]);
+
+  const handleOpenOrSaveLibraryEpub = useCallback(
+    async (novel: LibraryNovel) => {
+      try {
+        const cached = await getLibraryEpub(novel.id);
+        if (nativeMode) {
+          const file = await nativeShareLibraryEpub(
+            novel.fileName,
+            novel.nativeFile?.shareUri,
+            cached?.blob
+          );
+          patchLibraryEntry(novel.id, { nativeFile: file });
+          return;
+        }
+
+        if (!cached) {
+          showToast(
+            "Cached EPUB is no longer in browser storage — tap Re-download to regenerate."
+          );
+          return;
+        }
+
+        saveAs(cached.blob, cached.fileName || novel.fileName);
+        showToast(`Saving ${cached.fileName || novel.fileName}`);
+      } catch (err) {
+        const msg =
+          err instanceof Error ? err.message : "Could not open saved EPUB.";
+        // Ignore user cancelling Android Share sheet
+        if (!/cancel/i.test(msg)) {
+          showToast(msg);
+        }
+      }
+    },
+    [nativeMode, patchLibraryEntry, showToast]
+  );
+
+  const handleShareWebLibraryEpub = useCallback(
+    async (novel: LibraryNovel) => {
+      if (typeof navigator === "undefined" || !navigator.share) return;
+      try {
+        const cached = await getLibraryEpub(novel.id);
+        if (!cached) {
+          showToast(
+            "Cached EPUB is no longer in browser storage — tap Re-download first."
+          );
+          return;
+        }
+        const fileName = cached.fileName || novel.fileName;
+        const file = new File([cached.blob], fileName, {
+          type: "application/epub+zip",
+        });
+        await navigator.share({ files: [file], title: fileName });
+      } catch {
+        // User cancelled share sheet
+      }
+    },
+    [showToast]
+  );
+
+  const handleRemoveLibraryNovel = useCallback(
+    async (novel: LibraryNovel) => {
+      setLibrary((prev) => {
+        const updated = prev.filter((item) => item.id !== novel.id);
+        saveLibraryNovels(updated);
+        return updated;
+      });
+      await deleteLibraryAssets(novel.id);
+      if (nativeMode) {
+        await nativeDeleteCachedEpub(novel.fileName);
+      }
+      if (lastSavedLibraryId === novel.id) {
+        setLastSavedLibraryId(null);
+      }
+      showToast(`Removed "${novel.title}" from Library`);
+    },
+    [lastSavedLibraryId, nativeMode, showToast]
+  );
 
   const handleOpenInBrowser = useCallback(
     async (url: string, title?: string) => {
@@ -696,15 +1299,15 @@ export default function Home() {
           </button>
         </div>
 
-        {/* Main 3-Tab Navigation */}
+        {/* Main 4-Tab Navigation */}
         <nav
           aria-label="Primary sections"
-          className="grid grid-cols-3 gap-1.5 p-1 mb-5 rounded-xl bg-gray-100 border border-gray-200"
+          className="grid grid-cols-4 gap-1 p-1 mb-5 rounded-xl bg-gray-100 border border-gray-200"
         >
           <button
             type="button"
             onClick={() => setActiveTab("catalog")}
-            className={`py-2 px-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+            className={`py-2 px-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
               activeTab === "catalog"
                 ? "bg-white text-indigo-700 shadow-xs"
                 : "text-gray-600 hover:text-gray-900"
@@ -715,20 +1318,43 @@ export default function Home() {
 
           <button
             type="button"
+            onClick={() => setActiveTab("library")}
+            className={`py-2 px-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer flex items-center justify-center gap-1 ${
+              activeTab === "library"
+                ? "bg-white text-indigo-700 shadow-xs"
+                : "text-gray-600 hover:text-gray-900"
+            }`}
+          >
+            <span>Library</span>
+            {libraryUpdatesCount > 0 ? (
+              <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-amber-500 text-white leading-none">
+                {libraryUpdatesCount}
+              </span>
+            ) : (
+              library.length > 0 && (
+                <span className="px-1.5 py-0.5 text-[10px] rounded-full bg-gray-200 text-gray-700 leading-none">
+                  {library.length}
+                </span>
+              )
+            )}
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveTab("browser")}
-            className={`py-2 px-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
+            className={`py-2 px-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer ${
               activeTab === "browser"
                 ? "bg-white text-indigo-700 shadow-xs"
                 : "text-gray-600 hover:text-gray-900"
             }`}
           >
-            {nativeMode ? "Web Browser" : "Sites"}
+            {nativeMode ? "Browser" : "Sites"}
           </button>
 
           <button
             type="button"
             onClick={() => setActiveTab("downloader")}
-            className={`py-2 px-2 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 ${
+            className={`py-2 px-1.5 rounded-lg text-xs sm:text-sm font-bold transition-all cursor-pointer flex items-center justify-center gap-1 ${
               activeTab === "downloader"
                 ? "bg-white text-indigo-700 shadow-xs"
                 : "text-gray-600 hover:text-gray-900"
@@ -752,13 +1378,51 @@ export default function Home() {
             nativeMode={nativeMode}
             isDownloading={loading}
             queuedUrls={queuedUrls}
+            libraryById={libraryById}
             onDownloadNovel={(url) => startSingleDownload(url, true)}
             onQueueNovel={addToQueue}
             onOpenInBrowser={handleOpenInBrowser}
           />
         </div>
 
-        {/* Tab 2: Internal WebView Browser / Supported Sites Launcher */}
+        {/* Tab 2: Downloaded Novels Library & Update Checker */}
+        {activeTab === "library" && (
+          <NovelLibrary
+            novels={library}
+            nativeMode={nativeMode}
+            isDownloading={loading}
+            activeDownloadNovelId={activeDownloadNovelId}
+            checkingIds={checkingIds}
+            checkingAllProgress={checkingAllProgress}
+            onCheckUpdate={(novel) => {
+              void checkSingleNovelUpdate(novel, false);
+            }}
+            onCheckAllUpdates={() => {
+              void handleCheckAllUpdates();
+            }}
+            onCancelCheckAll={handleCancelCheckAll}
+            onUpdateNovel={(novel, forceFull) => {
+              void handleUpdateNovel(novel, forceFull);
+            }}
+            onUpdateAllOutdated={() => {
+              void handleUpdateAllOutdated();
+            }}
+            onOpenOrSaveEpub={(novel) => {
+              void handleOpenOrSaveLibraryEpub(novel);
+            }}
+            onShareWebEpub={(novel) => {
+              void handleShareWebLibraryEpub(novel);
+            }}
+            onRemoveNovel={(novel) => {
+              void handleRemoveLibraryNovel(novel);
+            }}
+            onOpenInBrowser={handleOpenInBrowser}
+            onGoToCatalog={() => setActiveTab("catalog")}
+            onGoToDownloader={() => setActiveTab("downloader")}
+          />
+        )}
+
+        {/* Tab 3: Internal WebView Browser / Supported Sites Launcher */}
         {activeTab === "browser" && (
           <InternalBrowserTab
             nativeMode={nativeMode}
@@ -768,7 +1432,7 @@ export default function Home() {
           />
         )}
 
-        {/* Tab 3: Direct Downloader, Queue & Setup */}
+        {/* Tab 4: Direct Downloader, Queue & Setup */}
         {activeTab === "downloader" && (
           <div className="space-y-5">
             {/* Connection Mode Info Banner */}
@@ -1002,6 +1666,15 @@ export default function Home() {
                       >
                         Open / Share EPUB
                       </button>
+                      {lastSavedLibraryId && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab("library")}
+                          className="bg-indigo-600 text-white text-sm font-bold py-2.5 px-4 rounded-lg hover:bg-indigo-700 transition-colors cursor-pointer"
+                        >
+                          View in Library →
+                        </button>
+                      )}
                     </div>
                   )}
 
@@ -1024,6 +1697,15 @@ export default function Home() {
                             Share / Open in Books
                           </button>
                         )}
+                      {lastSavedLibraryId && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab("library")}
+                          className="bg-purple-600 text-white text-sm font-bold py-2.5 px-4 rounded-lg hover:bg-purple-700 transition-colors cursor-pointer"
+                        >
+                          View in Library →
+                        </button>
+                      )}
                     </div>
                   )}
                 </div>

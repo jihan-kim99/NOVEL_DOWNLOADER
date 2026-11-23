@@ -1,5 +1,7 @@
 export type Platform = "narou" | "kakuyomu";
 
+export type NovelSerialStatus = "ongoing" | "completed" | "short" | "unknown";
+
 export interface NovelInfo {
   title: string;
   author?: string;
@@ -8,6 +10,8 @@ export interface NovelInfo {
   domain?: string;
   totalEpisodes?: number;
   isShortStory?: boolean;
+  status?: NovelSerialStatus;
+  remoteUpdatedAt?: string;
   /** Complete ordered list of episode URLs when extracted from TOC */
   episodeUrls?: string[];
   /** Number of Narou TOC pages when paginated (>1) */
@@ -18,6 +22,12 @@ export interface Episode {
   title: string;
   content: string;
   nextUrl: string | null;
+}
+
+export interface CachedEpisode {
+  url: string;
+  title: string;
+  content: string;
 }
 
 export interface DownloadRequest {
@@ -95,4 +105,49 @@ export interface QueuedNovel {
   siteLabel?: string;
   addedAt: number;
 }
+
+export interface LibraryNativeFile {
+  fileName: string;
+  documentsPath: string;
+  shareUri: string;
+}
+
+export interface LibraryNovel {
+  /** Canonical ID: `${platform}:${bookId.toLowerCase()}` */
+  id: string;
+  platform: Platform;
+  bookId: string;
+  domain: string;
+  siteLabel: string;
+  url: string;
+  title: string;
+  author?: string;
+  fileName: string;
+  fileSize?: number;
+  downloadedEpisodes: number;
+  latestKnownEpisodes: number;
+  hasUpdate: boolean;
+  newEpisodeCount: number;
+  status: NovelSerialStatus;
+  isShortStory?: boolean;
+  downloadedAt: number;
+  updatedAt: number;
+  lastCheckedAt?: number;
+  remoteUpdatedAt?: string;
+  lastCheckError?: string;
+  nativeFile?: LibraryNativeFile;
+  hasCachedEpub?: boolean;
+  hasCachedChapters?: boolean;
+}
+
+export interface NovelUpdateCheckResult {
+  title?: string;
+  author?: string;
+  domain?: string;
+  totalEpisodes: number;
+  status?: NovelSerialStatus;
+  isShortStory?: boolean;
+  remoteUpdatedAt?: string;
+}
+
 
