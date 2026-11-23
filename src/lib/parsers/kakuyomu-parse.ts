@@ -46,6 +46,15 @@ export function parseKakuyomuInfo(
   let author: string | undefined;
   let firstEpisodeId: string | null = null;
   let totalEpisodes: number | undefined;
+  const episodeIds: string[] = [];
+  const seenEpisodeIds = new Set<string>();
+
+  const addEpisodeId = (id: string | null) => {
+    if (id && !seenEpisodeIds.has(id)) {
+      seenEpisodeIds.add(id);
+      episodeIds.push(id);
+    }
+  };
 
   const nextDataText = $("#__NEXT_DATA__").html();
   if (nextDataText) {
@@ -84,23 +93,23 @@ export function parseKakuyomuInfo(
               (user.activityName || user.name || "").trim() || undefined;
           }
 
-          firstEpisodeId = extractRefId(work.firstPublicEpisodeUnion?.__ref);
-
-          if (!firstEpisodeId) {
-            const tocRefs =
-              work.tableOfContentsV2 || work.tableOfContents || [];
-            for (const chapterRef of tocRefs) {
-              if (!chapterRef?.__ref) continue;
-              const chapter = apollo[chapterRef.__ref] as
-                | ApolloChapter
-                | undefined;
-              const firstEpRef = chapter?.episodeUnions?.[0]?.__ref;
-              const id = extractRefId(firstEpRef);
-              if (id) {
-                firstEpisodeId = id;
-                break;
-              }
+          // Extract ALL ordered episodes from tableOfContentsV2 / tableOfContents
+          const tocRefs =
+            work.tableOfContentsV2 || work.tableOfContents || [];
+          for (const chapterRef of tocRefs) {
+            if (!chapterRef?.__ref) continue;
+            const chapter = apollo[chapterRef.__ref] as
+              | ApolloChapter
+              | undefined;
+            for (const epRef of chapter?.episodeUnions || []) {
+              addEpisodeId(extractRefId(epRef?.__ref));
             }
+          }
+
+          firstEpisodeId =
+            episodeIds[0] || extractRefId(work.firstPublicEpisodeUnion?.__ref);
+          if (firstEpisodeId && episodeIds.length === 0) {
+            addEpisodeId(firstEpisodeId);
           }
         }
       }
@@ -119,20 +128,23 @@ export function parseKakuyomuInfo(
       cleanKakuyomuTitle($("title").text());
   }
 
-  let firstHref = firstEpisodeId
-    ? `/works/${bookId}/episodes/${firstEpisodeId}`
-    : undefined;
-
-  if (!firstHref) {
-    const epRegex = new RegExp(`^/works/${bookId}/episodes/\\d+$`);
+  if (episodeIds.length === 0) {
+    const epRegex = new RegExp(`^/works/${bookId}/episodes/(\\d+)$`);
     $(`a[href^="/works/${bookId}/episodes/"]`).each((_, el) => {
-      if (firstHref) return;
       const href = $(el).attr("href");
-      if (href && epRegex.test(href)) {
-        firstHref = href;
+      const m = href ? href.match(epRegex) : null;
+      if (m) {
+        addEpisodeId(m[1]);
       }
     });
+    if (!firstEpisodeId && episodeIds.length > 0) {
+      firstEpisodeId = episodeIds[0];
+    }
   }
+
+  const firstHref = firstEpisodeId
+    ? `/works/${bookId}/episodes/${firstEpisodeId}`
+    : undefined;
 
   if (!firstHref) {
     throw new HttpStatusError(
@@ -141,13 +153,21 @@ export function parseKakuyomuInfo(
     );
   }
 
+  // Only expose episodeUrls for concurrent download when TOC appears complete
+  const episodeUrls =
+    episodeIds.length > 0 &&
+    (!totalEpisodes || episodeIds.length >= totalEpisodes)
+      ? episodeIds.map((id) => `https://kakuyomu.jp/works/${bookId}/episodes/${id}`)
+      : undefined;
+
   return {
     title: title || "Unknown Title",
     author,
     firstUrl: `https://kakuyomu.jp${firstHref}`,
     userAgent,
     domain: "kakuyomu.jp",
-    totalEpisodes,
+    totalEpisodes: totalEpisodes || (episodeUrls ? episodeUrls.length : undefined),
+    episodeUrls,
   };
 }
 

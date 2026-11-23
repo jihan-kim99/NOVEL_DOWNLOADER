@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-apk:
     runs-on: ubuntu-latest
@@ -51,3 +54,19 @@ jobs:
           name: NovelDownloader-Android-APK
           path: NovelDownloader.apk
           retention-days: 30
+
+      - name: Publish rolling latest GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view latest >/dev/null 2>&1; then
+            gh release upload latest NovelDownloader.apk --clobber
+            gh release edit latest \
+              --title "Latest Android Build (${GITHUB_SHA::7})" \
+              --notes "Automated Android APK build from commit \`${GITHUB_SHA}\`."
+          else
+            gh release create latest NovelDownloader.apk \
+              --title "Latest Android Build (${GITHUB_SHA::7})" \
+              --notes "Automated Android APK build from commit \`${GITHUB_SHA}\`." \
+              --prerelease
+          fi

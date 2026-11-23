@@ -41,6 +41,7 @@ export default function Home() {
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [totalEpisodes, setTotalEpisodes] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [concurrency, setConcurrency] = useState(5);
   const [nativeMode, setNativeMode] = useState(false);
   const [bridgeVersion, setBridgeVersion] = useState<string | null>(null);
   const [useBridgeForAll, setUseBridgeForAll] = useState(false);
@@ -239,79 +240,131 @@ export default function Home() {
 
       const { zip, oebps } = initializeEpub();
       const chapters: Chapter[] = [];
-      const visitedUrls = new Set<string>();
 
-      let currentUrl: string | null = info.firstUrl;
-      let episodeNum = 1;
+      const fetchSingleEpisode = async (epUrl: string): Promise<Episode> => {
+        if (nativeMode) {
+          return platform === "narou"
+            ? nativeFetchNarouEpisode(epUrl, controller.signal)
+            : nativeFetchKakuyomuEpisode(epUrl, controller.signal);
+        }
+        return fetchWithFallback<Episode>(
+          apiEndpoint,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+              type: "episode",
+              url: epUrl,
+              userAgent: info.userAgent,
+              platform,
+              domain,
+            }),
+          },
+          "parse-episode",
+          epUrl,
+          setStatus,
+          preferBridge,
+          bridgeAvailable
+        );
+      };
 
-      while (currentUrl) {
-        if (controller.signal.aborted) {
-          throw new DOMException("Download cancelled", "AbortError");
-        }
-        if (visitedUrls.has(currentUrl)) {
-          break;
-        }
-        visitedUrls.add(currentUrl);
+      const episodeUrls = info.episodeUrls;
+      if (episodeUrls && episodeUrls.length > 0) {
+        const total = episodeUrls.length;
+        setTotalEpisodes(total);
+        const workerCount = Math.max(1, Math.min(concurrency, total));
+        const orderedEpisodes: Array<Episode | null> = new Array(total).fill(
+          null
+        );
+        let nextIndex = 0;
+        let completed = 0;
 
         setStatus(
-          info.totalEpisodes
-            ? `Downloading episode ${episodeNum} of ${info.totalEpisodes}...`
-            : `Downloading episode ${episodeNum}...`
+          `Downloading ${total} episodes (${workerCount}x concurrent)...`
         );
 
-        let ep: Episode;
-        if (nativeMode) {
-          ep =
-            platform === "narou"
-              ? await nativeFetchNarouEpisode(currentUrl, controller.signal)
-              : await nativeFetchKakuyomuEpisode(currentUrl, controller.signal);
-        } else {
-          ep = await fetchWithFallback<Episode>(
-            apiEndpoint,
-            {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              signal: controller.signal,
-              body: JSON.stringify({
-                type: "episode",
-                url: currentUrl,
-                userAgent: info.userAgent,
-                platform,
-                domain,
-              }),
-            },
-            "parse-episode",
-            currentUrl,
-            setStatus,
-            preferBridge,
-            bridgeAvailable
-          );
-        }
+        const worker = async (workerId: number) => {
+          // Small stagger on launch so workers don't burst at the exact same millisecond
+          if (workerId > 0) {
+            await new Promise((r) => setTimeout(r, workerId * 60));
+          }
+          while (true) {
+            if (controller.signal.aborted) {
+              throw new DOMException("Download cancelled", "AbortError");
+            }
+            const idx = nextIndex++;
+            if (idx >= total) return;
 
-        if (!ep.content) {
-          break;
-        }
-
-        const fileName = `chapter_${episodeNum}.xhtml`;
-        oebps.file(fileName, buildChapterXhtml(ep.title, ep.content));
-        chapters.push({ title: ep.title, fileName });
-
-        setDownloadedCount(episodeNum);
-        currentUrl = ep.nextUrl;
-        episodeNum++;
-
-        if (currentUrl) {
-          await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(resolve, 200);
-            controller.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(timer);
-                reject(new DOMException("Download cancelled", "AbortError"));
-              },
-              { once: true }
+            const ep = await fetchSingleEpisode(episodeUrls[idx]);
+            orderedEpisodes[idx] = ep;
+            completed++;
+            setDownloadedCount(completed);
+            setStatus(
+              `Downloading ${completed} / ${total} episodes (${workerCount}x)...`
             );
-          });
+          }
+        };
+
+        await Promise.all(
+          Array.from({ length: workerCount }, (_, wIdx) => worker(wIdx))
+        );
+
+        let chapterNum = 1;
+        for (const ep of orderedEpisodes) {
+          if (!ep || !ep.content) continue;
+          const fileName = `chapter_${chapterNum}.xhtml`;
+          oebps.file(fileName, buildChapterXhtml(ep.title, ep.content));
+          chapters.push({ title: ep.title, fileName });
+          chapterNum++;
+        }
+      } else {
+        // Fallback: sequential next-link traversal when TOC URLs aren't available
+        const visitedUrls = new Set<string>();
+        let currentUrl: string | null = info.firstUrl;
+        let episodeNum = 1;
+
+        while (currentUrl) {
+          if (controller.signal.aborted) {
+            throw new DOMException("Download cancelled", "AbortError");
+          }
+          if (visitedUrls.has(currentUrl)) {
+            break;
+          }
+          visitedUrls.add(currentUrl);
+
+          setStatus(
+            info.totalEpisodes
+              ? `Downloading episode ${episodeNum} of ${info.totalEpisodes}...`
+              : `Downloading episode ${episodeNum}...`
+          );
+
+          const ep = await fetchSingleEpisode(currentUrl);
+          if (!ep.content) {
+            break;
+          }
+
+          const fileName = `chapter_${episodeNum}.xhtml`;
+          oebps.file(fileName, buildChapterXhtml(ep.title, ep.content));
+          chapters.push({ title: ep.title, fileName });
+
+          setDownloadedCount(episodeNum);
+          currentUrl = ep.nextUrl;
+          episodeNum++;
+
+          if (currentUrl) {
+            await new Promise<void>((resolve, reject) => {
+              const timer = setTimeout(resolve, 150);
+              controller.signal.addEventListener(
+                "abort",
+                () => {
+                  clearTimeout(timer);
+                  reject(new DOMException("Download cancelled", "AbortError"));
+                },
+                { once: true }
+              );
+            });
+          }
         }
       }
 
@@ -446,6 +499,27 @@ export default function Home() {
               className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all text-gray-800 placeholder-gray-400"
               required
             />
+          </div>
+
+          <div className="flex items-center justify-between gap-3">
+            <label
+              htmlFor="concurrency"
+              className="text-sm font-medium text-gray-700"
+            >
+              Download Concurrency
+            </label>
+            <select
+              id="concurrency"
+              value={concurrency}
+              onChange={(e) => setConcurrency(Number(e.target.value))}
+              disabled={loading}
+              className="px-3 py-1.5 text-sm border border-gray-300 rounded-lg bg-white text-gray-800 focus:ring-2 focus:ring-purple-500 outline-none disabled:opacity-50"
+            >
+              <option value={1}>1x (Sequential / Safest)</option>
+              <option value={3}>3x (Balanced)</option>
+              <option value={5}>5x (Fast — Recommended)</option>
+              <option value={8}>8x (Max Speed)</option>
+            </select>
           </div>
 
           {!nativeMode && bridgeVersion && (

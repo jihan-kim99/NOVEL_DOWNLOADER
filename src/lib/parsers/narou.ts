@@ -2,6 +2,7 @@ import type { Episode, NovelInfo } from "../../types";
 import { buildNarouHeaders, fetchWithRetry } from "../http";
 import {
   canonicalizeNarouDomain,
+  extractNarouTocPage,
   HttpStatusError,
   parseNarouEpisode,
   parseNarouInfo,
@@ -9,6 +10,7 @@ import {
 
 export {
   canonicalizeNarouDomain,
+  extractNarouTocPage,
   HttpStatusError,
   parseNarouEpisode,
   parseNarouInfo,
@@ -169,6 +171,59 @@ export async function handleNarouInfo(
       userAgent,
       finalUrl
     );
+
+    // Fetch remaining TOC pages in parallel so long serialized novels (>100 eps)
+    // can be downloaded concurrently with exact chapter URLs.
+    if (parsed.tocPages && parsed.tocPages > 1 && parsed.episodeUrls) {
+      const maxPages = Math.min(parsed.tocPages, 50);
+      const pageNums = Array.from({ length: maxPages - 1 }, (_, i) => i + 2);
+      const pageResults: string[][] = new Array(pageNums.length);
+      let cursor = 0;
+
+      const tocWorker = async () => {
+        while (cursor < pageNums.length) {
+          const idx = cursor++;
+          const pageNum = pageNums[idx];
+          try {
+            const tocUrl = `https://${resolvedDomain}/${normalizedId}/?p=${pageNum}`;
+            const tocRes = await fetchNarouPage(tocUrl, userAgent);
+            if (tocRes.response.ok) {
+              const tocHtml = await tocRes.response.text();
+              const { episodeUrls } = extractNarouTocPage(
+                tocHtml,
+                normalizedId,
+                resolvedDomain
+              );
+              pageResults[idx] = episodeUrls;
+            }
+          } catch {
+            // Leave empty; handled below
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(4, pageNums.length) }, () => tocWorker())
+      );
+
+      if (pageResults.every((r) => Array.isArray(r) && r.length > 0)) {
+        const merged = [...parsed.episodeUrls];
+        const seen = new Set(merged);
+        for (const list of pageResults) {
+          for (const u of list) {
+            if (!seen.has(u)) {
+              seen.add(u);
+              merged.push(u);
+            }
+          }
+        }
+        parsed.episodeUrls = merged;
+        parsed.totalEpisodes = merged.length;
+      } else {
+        // Incomplete TOC -> let client fall back cleanly to sequential nextUrl traversal
+        parsed.episodeUrls = undefined;
+      }
+    }
 
     if (!parsed.totalEpisodes || !parsed.author) {
       const apiMeta = await fetchNarouApiMeta(

@@ -8,6 +8,10 @@ export interface NovelInfo {
   domain?: string;
   totalEpisodes?: number;
   isShortStory?: boolean;
+  /** Complete ordered list of episode URLs when extracted from TOC */
+  episodeUrls?: string[];
+  /** Number of Narou TOC pages when paginated (>1) */
+  tocPages?: number;
 }
 
 export interface Episode {

@@ -13,6 +13,7 @@ import {
 } from "./parsers/kakuyomu-parse";
 import {
   canonicalizeNarouDomain,
+  extractNarouTocPage,
   HttpStatusError,
   parseNarouEpisode,
   parseNarouInfo,
@@ -262,6 +263,57 @@ export async function nativeFetchNarouInfo(
       DESKTOP_UA,
       finalUrl
     );
+
+    if (parsed.tocPages && parsed.tocPages > 1 && parsed.episodeUrls) {
+      const maxPages = Math.min(parsed.tocPages, 50);
+      const pageNums = Array.from({ length: maxPages - 1 }, (_, i) => i + 2);
+      const pageResults: string[][] = new Array(pageNums.length);
+      let cursor = 0;
+
+      const tocWorker = async () => {
+        while (cursor < pageNums.length) {
+          const idx = cursor++;
+          const pageNum = pageNums[idx];
+          try {
+            const tocUrl = `https://${resolvedDomain}/${normalizedId}/?p=${pageNum}`;
+            const tocRes = await nativeFetchNarouPage(tocUrl, signal);
+            if (tocRes.status >= 200 && tocRes.status < 300) {
+              const { episodeUrls } = extractNarouTocPage(
+                tocRes.html,
+                normalizedId,
+                resolvedDomain
+              );
+              pageResults[idx] = episodeUrls;
+            }
+          } catch (err) {
+            if (err instanceof DOMException && err.name === "AbortError") {
+              throw err;
+            }
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(4, pageNums.length) }, () => tocWorker())
+      );
+
+      if (pageResults.every((r) => Array.isArray(r) && r.length > 0)) {
+        const merged = [...parsed.episodeUrls];
+        const seen = new Set(merged);
+        for (const list of pageResults) {
+          for (const u of list) {
+            if (!seen.has(u)) {
+              seen.add(u);
+              merged.push(u);
+            }
+          }
+        }
+        parsed.episodeUrls = merged;
+        parsed.totalEpisodes = merged.length;
+      } else {
+        parsed.episodeUrls = undefined;
+      }
+    }
 
     if (!parsed.totalEpisodes || !parsed.author) {
       const meta = await nativeFetchNarouApiMeta(

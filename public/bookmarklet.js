@@ -230,8 +230,42 @@
     return new DOMParser().parseFromString(html, "text/html");
   }
 
+  function extractNarouTocLinks(doc, ncode) {
+    const epRegex = new RegExp(`^/${ncode}/(\\d+)/?$`, "i");
+    const urls = [];
+    const seen = new Set();
+    const add = (h) => {
+      if (!h || !epRegex.test(h)) return;
+      const full = location.origin + (h.endsWith("/") ? h : h + "/");
+      if (!seen.has(full)) {
+        seen.add(full);
+        urls.push(full);
+      }
+    };
+    doc
+      .querySelectorAll("a.p-eplist__subtitle, .novel_sublist2 a, dd.subtitle a")
+      .forEach((a) => add(a.getAttribute("href")));
+    if (urls.length === 0) {
+      doc.querySelectorAll("a[href]").forEach((a) => add(a.getAttribute("href")));
+    }
+
+    let lastTocPage = 1;
+    const pageRegex = new RegExp(`^/${ncode}/\\?p=(\\d+)$`, "i");
+    const lastA = doc.querySelector("a.c-pager__item--last");
+    const lastM = lastA ? (lastA.getAttribute("href") || "").match(pageRegex) : null;
+    if (lastM) {
+      lastTocPage = Math.max(1, Number(lastM[1]));
+    } else {
+      doc.querySelectorAll("a.c-pager__item[href]").forEach((a) => {
+        const m = (a.getAttribute("href") || "").match(pageRegex);
+        if (m) lastTocPage = Math.max(lastTocPage, Number(m[1]));
+      });
+    }
+    return { urls, lastTocPage };
+  }
+
   function parseNarouInfoDoc(doc, ncode) {
-    let title =
+    const title =
       doc.querySelector("h1.p-novel__title")?.textContent?.trim() ||
       doc.querySelector(".p-novel__title")?.textContent?.trim() ||
       doc.querySelector(".novel_title")?.textContent?.trim() ||
@@ -246,49 +280,30 @@
         .replace(/^作者[：:]\s*/, "")
         .trim() || undefined;
 
-    const epRegex = new RegExp(`^/${ncode}/(\\d+)/?$`, "i");
-    let firstHref = null;
-    const epLinks = doc.querySelectorAll(
-      "a.p-eplist__subtitle, .novel_sublist2 a, dd.subtitle a"
-    );
-    for (const a of epLinks) {
-      const h = a.getAttribute("href");
-      if (h && epRegex.test(h)) {
-        firstHref = h;
-        break;
-      }
-    }
-    if (!firstHref) {
-      for (const a of doc.querySelectorAll("a[href]")) {
-        const h = a.getAttribute("href");
-        if (h && epRegex.test(h)) {
-          firstHref = h;
-          break;
-        }
-      }
-    }
-
+    const { urls, lastTocPage } = extractNarouTocLinks(doc, ncode);
     const hasBody =
       !!doc.querySelector("div.p-novel__body") ||
       !!doc.querySelector("#novel_honbun") ||
       !!doc.querySelector("div.novel_view");
 
-    if (firstHref) {
-      const hasMorePages = !!doc.querySelector(
-        "a.c-pager__item--next, a.c-pager__item--last"
-      );
+    if (urls.length > 0) {
       return {
         title,
         author,
-        firstUrl: location.origin + firstHref,
-        totalEpisodes: !hasMorePages && epLinks.length ? epLinks.length : null,
+        firstUrl: urls[0],
+        episodeUrls: urls,
+        lastTocPage,
+        totalEpisodes: lastTocPage <= 1 ? urls.length : null,
       };
     }
     if (hasBody) {
+      const singleUrl = `${location.origin}/${ncode}/`;
       return {
         title,
         author,
-        firstUrl: `${location.origin}/${ncode}/`,
+        firstUrl: singleUrl,
+        episodeUrls: [singleUrl],
+        lastTocPage: 1,
         totalEpisodes: 1,
       };
     }
@@ -296,6 +311,8 @@
       title,
       author,
       firstUrl: `${location.origin}/${ncode}/1/`,
+      episodeUrls: null,
+      lastTocPage: 1,
       totalEpisodes: null,
     };
   }
@@ -358,6 +375,14 @@
     let author;
     let firstEpId = null;
     let totalEpisodes = null;
+    const epIds = [];
+    const seen = new Set();
+    const addId = (id) => {
+      if (id && !seen.has(id)) {
+        seen.add(id);
+        epIds.push(id);
+      }
+    };
     const nd = doc.querySelector("#__NEXT_DATA__")?.textContent;
     if (nd) {
       try {
@@ -374,21 +399,16 @@
               apollo[work.author.__ref].activityName ||
               apollo[work.author.__ref].name;
           }
-          if (work.firstPublicEpisodeUnion?.__ref) {
-            firstEpId = work.firstPublicEpisodeUnion.__ref.split(":")[1];
-          }
-          if (!firstEpId) {
-            for (const chRef of work.tableOfContentsV2 ||
-              work.tableOfContents ||
-              []) {
-              const ch = apollo[chRef?.__ref];
-              const ref = ch?.episodeUnions?.[0]?.__ref;
-              if (ref) {
-                firstEpId = ref.split(":")[1];
-                break;
-              }
+          for (const chRef of work.tableOfContentsV2 ||
+            work.tableOfContents ||
+            []) {
+            const ch = apollo[chRef?.__ref];
+            for (const epRef of ch?.episodeUnions || []) {
+              if (epRef?.__ref) addId(epRef.__ref.split(":")[1]);
             }
           }
+          firstEpId = epIds[0] || work.firstPublicEpisodeUnion?.__ref?.split(":")[1] || null;
+          if (firstEpId && epIds.length === 0) addId(firstEpId);
         }
       } catch {
         // Fallback to DOM
@@ -400,25 +420,28 @@
         doc.title.replace(/\s*-\s*カクヨム\s*$/, "").trim() ||
         workId;
     }
-    let firstHref = firstEpId ? `/works/${workId}/episodes/${firstEpId}` : null;
-    if (!firstHref) {
-      const epRegex = new RegExp(`^/works/${workId}/episodes/\\d+$`);
+    if (epIds.length === 0) {
+      const epRegex = new RegExp(`^/works/${workId}/episodes/(\\d+)$`);
       for (const a of doc.querySelectorAll(
         `a[href^="/works/${workId}/episodes/"]`
       )) {
-        const h = a.getAttribute("href");
-        if (h && epRegex.test(h)) {
-          firstHref = h;
-          break;
-        }
+        const m = (a.getAttribute("href") || "").match(epRegex);
+        if (m) addId(m[1]);
       }
+      if (!firstEpId && epIds.length > 0) firstEpId = epIds[0];
     }
-    if (!firstHref) throw new Error("Could not find first episode link.");
+    if (!firstEpId) throw new Error("Could not find first episode link.");
+    const episodeUrls =
+      epIds.length > 0 && (!totalEpisodes || epIds.length >= totalEpisodes)
+        ? epIds.map((id) => `https://kakuyomu.jp/works/${workId}/episodes/${id}`)
+        : null;
     return {
       title,
       author,
-      firstUrl: "https://kakuyomu.jp" + firstHref,
-      totalEpisodes,
+      firstUrl: `https://kakuyomu.jp/works/${workId}/episodes/${firstEpId}`,
+      episodeUrls,
+      lastTocPage: 1,
+      totalEpisodes: totalEpisodes || (episodeUrls ? episodeUrls.length : null),
     };
   }
 
@@ -612,55 +635,122 @@ ${chapters
 
       ui.setTitle(info.title);
 
-      const chapters = [];
-      const visited = new Set();
-      let currentUrl = info.firstUrl;
-      let epNum = 1;
-
-      while (currentUrl) {
-        if (controller.signal.aborted) {
-          throw new DOMException("Cancelled", "AbortError");
-        }
-        if (visited.has(currentUrl)) break;
-        visited.add(currentUrl);
-
-        ui.setStatus(
-          info.totalEpisodes
-            ? `Downloading episode ${epNum} / ${info.totalEpisodes}...`
-            : `Downloading episode ${epNum}...`
-        );
-        if (info.totalEpisodes) {
-          ui.setProgress(Math.round((epNum / info.totalEpisodes) * 95));
-        }
-
-        const epDoc = await fetchDoc(currentUrl, controller.signal);
-        const ep = isNarou
-          ? parseNarouEpDoc(epDoc, bookId)
-          : parseKakuyomuEpDoc(epDoc);
-
-        if (!ep.content) break;
-
-        chapters.push({
-          title: ep.title,
-          fileName: `chapter_${epNum}.xhtml`,
-          content: ep.content,
-        });
-
-        currentUrl = ep.nextUrl;
-        epNum++;
-
-        if (currentUrl) {
-          await new Promise((resolve, reject) => {
-            const t = setTimeout(resolve, 250);
-            controller.signal.addEventListener(
-              "abort",
-              () => {
-                clearTimeout(t);
-                reject(new DOMException("Cancelled", "AbortError"));
-              },
-              { once: true }
+      // Fetch remaining Narou TOC pages if paginated (>100 episodes)
+      if (isNarou && info.lastTocPage > 1 && info.episodeUrls) {
+        ui.setStatus(`Loading table of contents (${info.lastTocPage} pages)...`);
+        const maxPages = Math.min(info.lastTocPage, 50);
+        const pages = Array.from({ length: maxPages - 1 }, (_, i) => i + 2);
+        const pageUrls = new Array(pages.length);
+        let pCursor = 0;
+        const tocWorker = async () => {
+          while (pCursor < pages.length) {
+            const idx = pCursor++;
+            const pDoc = await fetchDoc(
+              `${location.origin}/${bookId}/?p=${pages[idx]}`,
+              controller.signal
             );
+            pageUrls[idx] = extractNarouTocLinks(pDoc, bookId).urls;
+          }
+        };
+        await Promise.all(
+          Array.from({ length: Math.min(4, pages.length) }, () => tocWorker())
+        );
+        const merged = [...info.episodeUrls];
+        const seen = new Set(merged);
+        for (const list of pageUrls) {
+          for (const u of list || []) {
+            if (!seen.has(u)) {
+              seen.add(u);
+              merged.push(u);
+            }
+          }
+        }
+        info.episodeUrls = merged;
+        info.totalEpisodes = merged.length;
+      }
+
+      const chapters = [];
+      const CONCURRENCY = 5;
+
+      if (info.episodeUrls && info.episodeUrls.length > 0) {
+        const total = info.episodeUrls.length;
+        const workerCount = Math.min(CONCURRENCY, total);
+        const ordered = new Array(total).fill(null);
+        let nextIdx = 0;
+        let completed = 0;
+
+        ui.setStatus(`Downloading ${total} episodes (${workerCount}x)...`);
+        const worker = async (wid) => {
+          if (wid > 0) await new Promise((r) => setTimeout(r, wid * 60));
+          while (true) {
+            if (controller.signal.aborted) {
+              throw new DOMException("Cancelled", "AbortError");
+            }
+            const idx = nextIdx++;
+            if (idx >= total) return;
+            const epDoc = await fetchDoc(
+              info.episodeUrls[idx],
+              controller.signal
+            );
+            ordered[idx] = isNarou
+              ? parseNarouEpDoc(epDoc, bookId)
+              : parseKakuyomuEpDoc(epDoc);
+            completed++;
+            ui.setStatus(
+              `Downloading ${completed} / ${total} (${workerCount}x)...`
+            );
+            ui.setProgress(Math.round((completed / total) * 95));
+          }
+        };
+        await Promise.all(
+          Array.from({ length: workerCount }, (_, w) => worker(w))
+        );
+        let num = 1;
+        for (const ep of ordered) {
+          if (!ep || !ep.content) continue;
+          chapters.push({
+            title: ep.title,
+            fileName: `chapter_${num}.xhtml`,
+            content: ep.content,
           });
+          num++;
+        }
+      } else {
+        const visited = new Set();
+        let currentUrl = info.firstUrl;
+        let epNum = 1;
+
+        while (currentUrl) {
+          if (controller.signal.aborted) {
+            throw new DOMException("Cancelled", "AbortError");
+          }
+          if (visited.has(currentUrl)) break;
+          visited.add(currentUrl);
+
+          ui.setStatus(
+            info.totalEpisodes
+              ? `Downloading episode ${epNum} / ${info.totalEpisodes}...`
+              : `Downloading episode ${epNum}...`
+          );
+          if (info.totalEpisodes) {
+            ui.setProgress(Math.round((epNum / info.totalEpisodes) * 95));
+          }
+
+          const epDoc = await fetchDoc(currentUrl, controller.signal);
+          const ep = isNarou
+            ? parseNarouEpDoc(epDoc, bookId)
+            : parseKakuyomuEpDoc(epDoc);
+
+          if (!ep.content) break;
+
+          chapters.push({
+            title: ep.title,
+            fileName: `chapter_${epNum}.xhtml`,
+            content: ep.content,
+          });
+
+          currentUrl = ep.nextUrl;
+          epNum++;
         }
       }
 

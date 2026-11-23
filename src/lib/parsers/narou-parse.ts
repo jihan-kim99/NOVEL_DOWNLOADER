@@ -57,6 +57,57 @@ function cleanNarouTitle(raw: string): string {
     .trim();
 }
 
+export function extractNarouTocPage(
+  html: string,
+  bookId: string,
+  domain: string
+): { episodeUrls: string[]; lastTocPage: number } {
+  const normalizedId = bookId.toLowerCase();
+  const canonicalDomain = canonicalizeNarouDomain(domain);
+  const $ = cheerio.load(html);
+
+  const epPathRegex = new RegExp(`^/${normalizedId}/(\\d+)/?$`, "i");
+  const episodeUrls: string[] = [];
+  const seen = new Set<string>();
+
+  const addHref = (href: string | undefined) => {
+    if (!href || !epPathRegex.test(href)) return;
+    const normalizedPath = href.endsWith("/") ? href : `${href}/`;
+    const full = `https://${canonicalDomain}${normalizedPath}`;
+    if (!seen.has(full)) {
+      seen.add(full);
+      episodeUrls.push(full);
+    }
+  };
+
+  $("a.p-eplist__subtitle, .novel_sublist2 a, dd.subtitle a").each((_, el) => {
+    addHref($(el).attr("href"));
+  });
+
+  if (episodeUrls.length === 0) {
+    $("a[href]").each((_, el) => {
+      addHref($(el).attr("href"));
+    });
+  }
+
+  let lastTocPage = 1;
+  const pageRegex = new RegExp(`^/${normalizedId}/\\?p=(\\d+)$`, "i");
+  const lastHref = $("a.c-pager__item--last").first().attr("href");
+  const lastMatch = lastHref ? lastHref.match(pageRegex) : null;
+  if (lastMatch) {
+    lastTocPage = Math.max(1, Number(lastMatch[1]));
+  } else {
+    $("a.c-pager__item[href]").each((_, el) => {
+      const m = ($(el).attr("href") || "").match(pageRegex);
+      if (m) {
+        lastTocPage = Math.max(lastTocPage, Number(m[1]));
+      }
+    });
+  }
+
+  return { episodeUrls, lastTocPage };
+}
+
 export function parseNarouInfo(
   html: string,
   bookId: string,
@@ -101,29 +152,11 @@ export function parseNarouInfo(
       .trim();
   }
 
-  const epPathRegex = new RegExp(`^/${normalizedId}/(\\d+)/?$`, "i");
-  let firstHref: string | undefined;
-
-  const epListLinks = $(
-    "a.p-eplist__subtitle, .novel_sublist2 a, dd.subtitle a"
+  const { episodeUrls: page1Urls, lastTocPage } = extractNarouTocPage(
+    html,
+    normalizedId,
+    canonicalDomain
   );
-  epListLinks.each((_, el) => {
-    if (firstHref) return;
-    const href = $(el).attr("href");
-    if (href && epPathRegex.test(href)) {
-      firstHref = href;
-    }
-  });
-
-  if (!firstHref) {
-    $("a[href]").each((_, el) => {
-      if (firstHref) return;
-      const href = $(el).attr("href");
-      if (href && epPathRegex.test(href)) {
-        firstHref = href;
-      }
-    });
-  }
 
   const hasBodyOnIndex =
     $("div.p-novel__body").length > 0 ||
@@ -133,18 +166,19 @@ export function parseNarouInfo(
   let firstUrl: string;
   let isShortStory = false;
   let totalEpisodes: number | undefined;
+  let episodeUrls: string[] | undefined;
 
-  if (firstHref) {
-    firstUrl = `https://${canonicalDomain}${firstHref}`;
-    const hasNextTocPage =
-      $("a.c-pager__item--next, a.c-pager__item--last").length > 0;
-    if (!hasNextTocPage && epListLinks.length > 0) {
-      totalEpisodes = epListLinks.length;
+  if (page1Urls.length > 0) {
+    firstUrl = page1Urls[0];
+    episodeUrls = page1Urls;
+    if (lastTocPage <= 1) {
+      totalEpisodes = page1Urls.length;
     }
   } else if (hasBodyOnIndex) {
     firstUrl = `https://${canonicalDomain}/${normalizedId}/`;
     isShortStory = true;
     totalEpisodes = 1;
+    episodeUrls = [firstUrl];
   } else {
     firstUrl = `https://${canonicalDomain}/${normalizedId}/1/`;
   }
@@ -157,6 +191,8 @@ export function parseNarouInfo(
     domain: canonicalDomain,
     totalEpisodes,
     isShortStory,
+    episodeUrls,
+    tocPages: lastTocPage > 1 ? lastTocPage : undefined,
   };
 }
 

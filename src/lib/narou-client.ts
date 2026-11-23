@@ -1,3 +1,6 @@
+import type { NovelInfo } from "../types";
+import { extractNarouTocPage } from "./parsers/narou-parse";
+
 export class CloudBlockError extends Error {
   constructor(message: string) {
     super(message);
@@ -186,7 +189,64 @@ async function fetchAndParseViaBridge<T>(
     throw new Error(parseErr);
   }
 
-  return (await parseRes.json()) as T;
+  const parsed = (await parseRes.json()) as T;
+
+  // If this is a multi-page Narou TOC fetched via Browser Helper Bridge,
+  // fetch the remaining TOC pages concurrently via the bridge for fast downloads.
+  if (
+    fallbackType === "parse-info" &&
+    originalBody.platform === "narou" &&
+    originalBody.bookId
+  ) {
+    const info = parsed as unknown as NovelInfo;
+    if (info.tocPages && info.tocPages > 1 && info.episodeUrls && info.domain) {
+      const normalizedId = String(originalBody.bookId).toLowerCase();
+      const maxPages = Math.min(info.tocPages, 50);
+      const pageNums = Array.from({ length: maxPages - 1 }, (_, i) => i + 2);
+      const pageResults: string[][] = new Array(pageNums.length);
+      let cursor = 0;
+
+      const tocWorker = async () => {
+        while (cursor < pageNums.length) {
+          const idx = cursor++;
+          const pageNum = pageNums[idx];
+          const tocUrl = `https://${info.domain}/${normalizedId}/?p=${pageNum}`;
+          const tocRes = await fetchViaBrowserBridge(tocUrl, options.signal);
+          if (tocRes.ok) {
+            const { episodeUrls } = extractNarouTocPage(
+              tocRes.html,
+              normalizedId,
+              info.domain!
+            );
+            pageResults[idx] = episodeUrls;
+          }
+        }
+      };
+
+      await Promise.all(
+        Array.from({ length: Math.min(4, pageNums.length) }, () => tocWorker())
+      );
+
+      if (pageResults.every((r) => Array.isArray(r) && r.length > 0)) {
+        const merged = [...info.episodeUrls];
+        const seen = new Set(merged);
+        for (const list of pageResults) {
+          for (const u of list) {
+            if (!seen.has(u)) {
+              seen.add(u);
+              merged.push(u);
+            }
+          }
+        }
+        info.episodeUrls = merged;
+        info.totalEpisodes = merged.length;
+      } else {
+        info.episodeUrls = undefined;
+      }
+    }
+  }
+
+  return parsed;
 }
 
 export async function fetchWithFallback<T>(

@@ -1,6 +1,14 @@
 # Novel Downloader
 
-A [Next.js](https://nextjs.org) web app and **native Android app (Capacitor)** that downloads web novels as valid EPUB 3 files.
+A [Next.js](https://nextjs.org) web app and **native Android app (Capacitor)** that downloads web novels concurrently as valid EPUB 3 files.
+
+## Download Latest Android APK
+
+- **Direct APK Download (1-tap on Android):** [NovelDownloader.apk (Latest Release)](https://github.com/jihan-kim99/NOVEL_DOWNLOADER/releases/download/latest/NovelDownloader.apk)
+- **Latest Release Page:** [github.com/jihan-kim99/NOVEL_DOWNLOADER/releases/tag/latest](https://github.com/jihan-kim99/NOVEL_DOWNLOADER/releases/tag/latest)
+- **GitHub Actions Build Artifacts:** [Build Android APK Workflow Runs](https://github.com/jihan-kim99/NOVEL_DOWNLOADER/actions/workflows/android-apk.yml)
+
+> Every push to `main` (or manual run in GitHub Actions) automatically builds a fresh `NovelDownloader.apk`, uploads it as an Actions artifact, and updates the permanent `latest` direct download link above.
 
 ## Supported Websites
 
@@ -8,16 +16,14 @@ A [Next.js](https://nextjs.org) web app and **native Android app (Capacitor)** t
 - **Shosetsuka ni Narou** (`https://ncode.syosetu.com/<ncode>/`)
 - **Narou R18** — **Nocturne Novels**, **Moonlight Novels**, and **Midnight Novels** (`https://novel18.syosetu.com/<ncode>/`, plus URLs from `noc.syosetu.com`, `mnlt.syosetu.com`, `mid.syosetu.com`, `nl.syosetu.com/redirect/ageauth/...`, or bare ncodes like `n1234ab`)
 
-## Android App (Recommended for Mobile)
+## Features
 
-The Android app runs 100% on-device via Capacitor (`CapacitorHttp` + `CapacitorCookies` + `Filesystem` + `Share`) — no server, no CORS, no cloud IP blocks, and automatic `over18=yes` R18 age verification. It also registers in the **Android Share Sheet**, so you can tap **Share → Novel Downloader** directly from Chrome on any novel page, and saves EPUBs straight to `Documents/NovelDownloader/`.
+- **Concurrent Episode Downloading:** Extracts the complete episode list upfront (across all Narou paginated TOC pages and Kakuyomu's TOC) and downloads episodes in parallel (`1x` / `3x` / `5x` / `8x` concurrency selector, default `5x`) while preserving exact chapter order.
+- **Native Android App:** Runs 100% on-device via Capacitor (`CapacitorHttp` + `CapacitorCookies` + `Filesystem` + `Share`) — no server, no CORS, no cloud IP blocks, automatic `over18=yes` R18 age verification, Android Share Sheet support (**Share → Novel Downloader** from Chrome), and saves EPUBs to `Documents/NovelDownloader/`.
+- **Valid EPUB 3 Output:** Preserves `<ruby>` furigana and formatting, handles short stories (短編), and escapes all XML entities cleanly.
 
-### Download the APK (No Android Studio Needed)
-1. Push to `main` (or trigger **Build Android APK** manually in the **Actions** tab on GitHub).
-2. Open the completed workflow run → download the **`NovelDownloader-Android-APK`** artifact (`NovelDownloader.apk`).
-3. Transfer/open `NovelDownloader.apk` on your Android phone and install.
+## Build Android APK Locally (Optional, requires Android SDK & JDK 21)
 
-### Build Locally (with Android SDK / JDK 21)
 ```bash
 yarn install
 yarn build:android
