@@ -10,6 +10,8 @@ interface ApolloRef {
 interface ApolloWork {
   title?: string;
   publicEpisodeCount?: number;
+  serialStatus?: string;
+  lastEpisodePublishedAt?: string;
   author?: ApolloRef;
   firstPublicEpisodeUnion?: ApolloRef;
   tableOfContentsV2?: ApolloRef[];
@@ -46,6 +48,8 @@ export function parseKakuyomuInfo(
   let author: string | undefined;
   let firstEpisodeId: string | null = null;
   let totalEpisodes: number | undefined;
+  let status: NovelInfo["status"];
+  let remoteUpdatedAt: string | undefined;
   const episodeIds: string[] = [];
   const seenEpisodeIds = new Set<string>();
 
@@ -84,6 +88,19 @@ export function parseKakuyomuInfo(
             work.publicEpisodeCount > 0
           ) {
             totalEpisodes = work.publicEpisodeCount;
+          }
+
+          if (work.serialStatus === "COMPLETED") {
+            status = "completed";
+          } else if (work.serialStatus === "RUNNING") {
+            status = "ongoing";
+          }
+
+          if (
+            typeof work.lastEpisodePublishedAt === "string" &&
+            work.lastEpisodePublishedAt.trim()
+          ) {
+            remoteUpdatedAt = work.lastEpisodePublishedAt.trim();
           }
 
           const authorRef = work.author?.__ref;
@@ -167,6 +184,8 @@ export function parseKakuyomuInfo(
     userAgent,
     domain: "kakuyomu.jp",
     totalEpisodes: totalEpisodes || (episodeUrls ? episodeUrls.length : undefined),
+    status,
+    remoteUpdatedAt,
     episodeUrls,
   };
 }

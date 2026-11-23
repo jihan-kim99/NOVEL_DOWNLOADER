@@ -1,4 +1,4 @@
-import type { Episode, NovelInfo } from "../../types";
+import type { Episode, NovelInfo, NovelUpdateCheckResult } from "../../types";
 import { buildNarouHeaders, fetchWithRetry } from "../http";
 import {
   canonicalizeNarouDomain,
@@ -6,6 +6,7 @@ import {
   HttpStatusError,
   parseNarouEpisode,
   parseNarouInfo,
+  parseSyosetuApiMeta,
 } from "./narou-parse";
 
 export {
@@ -14,38 +15,72 @@ export {
   HttpStatusError,
   parseNarouEpisode,
   parseNarouInfo,
+  parseSyosetuApiMeta,
 };
 
 async function fetchNarouApiMeta(
   bookId: string,
   domain: string,
   userAgent: string
-): Promise<{ totalEpisodes?: number; author?: string }> {
+): Promise<NovelUpdateCheckResult | null> {
   const endpoint =
     domain === "novel18.syosetu.com"
-      ? `https://api.syosetu.com/novel18api/api/?out=json&ncode=${encodeURIComponent(bookId)}&of=ga-w`
-      : `https://api.syosetu.com/novelapi/api/?out=json&ncode=${encodeURIComponent(bookId)}&of=ga-w`;
+      ? `https://api.syosetu.com/novel18api/api/?out=json&ncode=${encodeURIComponent(bookId)}`
+      : `https://api.syosetu.com/novelapi/api/?out=json&ncode=${encodeURIComponent(bookId)}`;
 
   try {
     const res = await fetch(endpoint, {
       headers: { "User-Agent": userAgent },
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) return {};
+    if (!res.ok) return null;
     const data = await res.json();
-    if (Array.isArray(data) && data.length > 1 && data[1]) {
-      const total = Number(data[1].general_all_no);
-      const writer =
-        typeof data[1].writer === "string" ? data[1].writer.trim() : undefined;
-      return {
-        totalEpisodes: Number.isFinite(total) && total > 0 ? total : undefined,
-        author: writer || undefined,
-      };
-    }
+    return parseSyosetuApiMeta(data, domain);
   } catch {
     // Best-effort metadata only
   }
-  return {};
+  return null;
+}
+
+/**
+ * Fast, cloud-IP-safe update check for Narou / Narou R18 using Syosetu's public JSON API,
+ * falling back to full TOC scraping only if the API returns no entry.
+ */
+export async function checkNarouUpdate(
+  bookId: string,
+  userAgent: string,
+  domain: string = "ncode.syosetu.com"
+): Promise<NovelUpdateCheckResult> {
+  const normalizedId = bookId.toLowerCase();
+  const primaryDomain = canonicalizeNarouDomain(domain);
+  const domainsToTry = [
+    primaryDomain,
+    primaryDomain === "ncode.syosetu.com"
+      ? "novel18.syosetu.com"
+      : "ncode.syosetu.com",
+  ];
+
+  for (const currentDomain of domainsToTry) {
+    const meta = await fetchNarouApiMeta(normalizedId, currentDomain, userAgent);
+    if (meta && meta.totalEpisodes > 0) {
+      return meta;
+    }
+  }
+
+  // Fallback to HTML info scrape if Syosetu API has no record yet
+  const info = await handleNarouInfo(normalizedId, userAgent, primaryDomain, true);
+  const totalEpisodes =
+    info.totalEpisodes || info.episodeUrls?.length || (info.isShortStory ? 1 : 0);
+
+  return {
+    title: info.title,
+    author: info.author,
+    domain: info.domain || primaryDomain,
+    totalEpisodes,
+    status: info.status || (info.isShortStory ? "short" : "unknown"),
+    isShortStory: info.isShortStory,
+    remoteUpdatedAt: info.remoteUpdatedAt,
+  };
 }
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -225,17 +260,30 @@ export async function handleNarouInfo(
       }
     }
 
-    if (!parsed.totalEpisodes || !parsed.author) {
+    if (
+      !parsed.totalEpisodes ||
+      !parsed.author ||
+      !parsed.status ||
+      !parsed.remoteUpdatedAt
+    ) {
       const apiMeta = await fetchNarouApiMeta(
         normalizedId,
         resolvedDomain,
         userAgent
       );
-      if (!parsed.totalEpisodes && apiMeta.totalEpisodes) {
-        parsed.totalEpisodes = apiMeta.totalEpisodes;
-      }
-      if (!parsed.author && apiMeta.author) {
-        parsed.author = apiMeta.author;
+      if (apiMeta) {
+        if (!parsed.totalEpisodes && apiMeta.totalEpisodes) {
+          parsed.totalEpisodes = apiMeta.totalEpisodes;
+        }
+        if (!parsed.author && apiMeta.author) {
+          parsed.author = apiMeta.author;
+        }
+        if (!parsed.status && apiMeta.status) {
+          parsed.status = apiMeta.status;
+        }
+        if (!parsed.remoteUpdatedAt && apiMeta.remoteUpdatedAt) {
+          parsed.remoteUpdatedAt = apiMeta.remoteUpdatedAt;
+        }
       }
     }
 

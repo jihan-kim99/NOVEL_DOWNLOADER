@@ -1,5 +1,10 @@
 import * as cheerio from "cheerio";
-import type { Episode, NovelInfo } from "../../types";
+import type {
+  Episode,
+  NovelInfo,
+  NovelSerialStatus,
+  NovelUpdateCheckResult,
+} from "../../types";
 import { paragraphsToXhtml } from "../xhtml";
 
 export class HttpStatusError extends Error {
@@ -191,8 +196,72 @@ export function parseNarouInfo(
     domain: canonicalDomain,
     totalEpisodes,
     isShortStory,
+    status: isShortStory ? "short" : undefined,
     episodeUrls,
     tocPages: lastTocPage > 1 ? lastTocPage : undefined,
+  };
+}
+
+/**
+ * Parses a Syosetu novelapi / novel18api JSON response for a single ncode.
+ */
+export function parseSyosetuApiMeta(
+  raw: unknown,
+  domain: string
+): NovelUpdateCheckResult | null {
+  if (!Array.isArray(raw) || raw.length < 2 || !raw[1] || typeof raw[1] !== "object") {
+    return null;
+  }
+  const entry = raw[1] as Record<string, unknown>;
+  const totalRaw = Number(entry.general_all_no);
+  const novelType = Number(entry.novel_type);
+  const endFlag = Number(entry.end);
+  const isShortStory = novelType === 2;
+
+  const totalEpisodes =
+    Number.isFinite(totalRaw) && totalRaw > 0
+      ? totalRaw
+      : isShortStory
+      ? 1
+      : 0;
+
+  if (totalEpisodes <= 0) {
+    return null;
+  }
+
+  let status: NovelSerialStatus = "unknown";
+  if (isShortStory) {
+    status = "short";
+  } else if (endFlag === 0) {
+    status = "completed";
+  } else if (endFlag === 1) {
+    status = "ongoing";
+  }
+
+  const title =
+    typeof entry.title === "string" && entry.title.trim()
+      ? entry.title.trim()
+      : undefined;
+  const author =
+    typeof entry.writer === "string" && entry.writer.trim()
+      ? entry.writer.trim()
+      : undefined;
+  const remoteUpdatedAt =
+    typeof entry.general_lastup === "string" && entry.general_lastup.trim()
+      ? entry.general_lastup.trim()
+      : typeof entry.novelupdated_at === "string" &&
+        entry.novelupdated_at.trim()
+      ? entry.novelupdated_at.trim()
+      : undefined;
+
+  return {
+    title,
+    author,
+    domain: canonicalizeNarouDomain(domain),
+    totalEpisodes,
+    status,
+    isShortStory,
+    remoteUpdatedAt,
   };
 }
 

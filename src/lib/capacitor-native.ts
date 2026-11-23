@@ -11,6 +11,8 @@ import type {
   BrowseResponse,
   Episode,
   NovelInfo,
+  NovelUpdateCheckResult,
+  Platform,
 } from "../types";
 import {
   buildKakuyomuBrowseUrl,
@@ -28,6 +30,7 @@ import {
   HttpStatusError,
   parseNarouEpisode,
   parseNarouInfo,
+  parseSyosetuApiMeta,
 } from "./parsers/narou-parse";
 
 const DESKTOP_UA =
@@ -193,11 +196,11 @@ async function nativeFetchNarouApiMeta(
   bookId: string,
   domain: string,
   signal?: AbortSignal
-): Promise<{ totalEpisodes?: number; author?: string }> {
+): Promise<NovelUpdateCheckResult | null> {
   const endpoint =
     domain === "novel18.syosetu.com"
-      ? `https://api.syosetu.com/novel18api/api/?out=json&ncode=${encodeURIComponent(bookId)}&of=ga-w`
-      : `https://api.syosetu.com/novelapi/api/?out=json&ncode=${encodeURIComponent(bookId)}&of=ga-w`;
+      ? `https://api.syosetu.com/novel18api/api/?out=json&ncode=${encodeURIComponent(bookId)}`
+      : `https://api.syosetu.com/novelapi/api/?out=json&ncode=${encodeURIComponent(bookId)}`;
 
   try {
     const res = await nativeRequestWithRetry(
@@ -207,22 +210,14 @@ async function nativeFetchNarouApiMeta(
       signal,
       0
     );
-    if (res.status < 200 || res.status >= 300) return {};
+    if (res.status < 200 || res.status >= 300) return null;
     const raw =
       typeof res.data === "string" ? JSON.parse(res.data) : res.data;
-    if (Array.isArray(raw) && raw.length > 1 && raw[1]) {
-      const total = Number(raw[1].general_all_no);
-      const writer =
-        typeof raw[1].writer === "string" ? raw[1].writer.trim() : undefined;
-      return {
-        totalEpisodes: Number.isFinite(total) && total > 0 ? total : undefined,
-        author: writer || undefined,
-      };
-    }
+    return parseSyosetuApiMeta(raw, domain);
   } catch {
     // Best-effort metadata only
   }
-  return {};
+  return null;
 }
 
 export async function nativeFetchNarouInfo(
@@ -326,17 +321,30 @@ export async function nativeFetchNarouInfo(
       }
     }
 
-    if (!parsed.totalEpisodes || !parsed.author) {
+    if (
+      !parsed.totalEpisodes ||
+      !parsed.author ||
+      !parsed.status ||
+      !parsed.remoteUpdatedAt
+    ) {
       const meta = await nativeFetchNarouApiMeta(
         normalizedId,
         resolvedDomain,
         signal
       );
-      if (!parsed.totalEpisodes && meta.totalEpisodes) {
-        parsed.totalEpisodes = meta.totalEpisodes;
-      }
-      if (!parsed.author && meta.author) {
-        parsed.author = meta.author;
+      if (meta) {
+        if (!parsed.totalEpisodes && meta.totalEpisodes) {
+          parsed.totalEpisodes = meta.totalEpisodes;
+        }
+        if (!parsed.author && meta.author) {
+          parsed.author = meta.author;
+        }
+        if (!parsed.status && meta.status) {
+          parsed.status = meta.status;
+        }
+        if (!parsed.remoteUpdatedAt && meta.remoteUpdatedAt) {
+          parsed.remoteUpdatedAt = meta.remoteUpdatedAt;
+        }
       }
     }
 
@@ -484,6 +492,161 @@ export async function nativeShareEpub(file: NativeSavedFile): Promise<void> {
     url: file.shareUri,
     dialogTitle: "Open or Share EPUB",
   });
+}
+
+/**
+ * Opens or shares a previously downloaded library EPUB on Android.
+ * Re-hydrates the Cache URI from Documents/NovelDownloader/ or an IndexedDB fallback blob
+ * if Android OS has evicted the temporary Cache copy.
+ */
+export async function nativeShareLibraryEpub(
+  fileName: string,
+  existingShareUri?: string,
+  fallbackBlob?: Blob
+): Promise<NativeSavedFile> {
+  const docsRelativePath = `NovelDownloader/${fileName}`;
+  const documentsPath = `Documents/${docsRelativePath}`;
+
+  // 1. Check whether the Cache copy still exists
+  try {
+    await Filesystem.stat({
+      path: fileName,
+      directory: Directory.Cache,
+    });
+    const uriRes = await Filesystem.getUri({
+      path: fileName,
+      directory: Directory.Cache,
+    });
+    const file: NativeSavedFile = {
+      fileName,
+      documentsPath,
+      shareUri: uriRes.uri || existingShareUri || "",
+    };
+    if (file.shareUri) {
+      await nativeShareEpub(file);
+      return file;
+    }
+  } catch {
+    // Cache file evicted; try restoring from Documents or fallback blob
+  }
+
+  // 2. Restore Cache file from Documents/NovelDownloader/<fileName>
+  try {
+    const readRes = await Filesystem.readFile({
+      path: docsRelativePath,
+      directory: Directory.Documents,
+    });
+    if (typeof readRes.data === "string" && readRes.data.length > 0) {
+      const cacheRes = await Filesystem.writeFile({
+        path: fileName,
+        data: readRes.data,
+        directory: Directory.Cache,
+        recursive: true,
+      });
+      const file: NativeSavedFile = {
+        fileName,
+        documentsPath,
+        shareUri: cacheRes.uri,
+      };
+      await nativeShareEpub(file);
+      return file;
+    }
+  } catch {
+    // Fall through to IndexedDB fallback blob
+  }
+
+  // 3. Restore from IndexedDB Blob if available
+  if (fallbackBlob) {
+    const saved = await nativeSaveEpub(fallbackBlob, fileName);
+    await nativeShareEpub(saved);
+    return saved;
+  }
+
+  // 4. Last resort: try existingShareUri directly if present
+  if (existingShareUri) {
+    const file: NativeSavedFile = {
+      fileName,
+      documentsPath,
+      shareUri: existingShareUri,
+    };
+    await nativeShareEpub(file);
+    return file;
+  }
+
+  throw new Error(
+    "Saved EPUB file was not found on device. Tap Re-download to regenerate it."
+  );
+}
+
+/**
+ * Best-effort cleanup of the temporary Cache copy when removing a novel from Library.
+ */
+export async function nativeDeleteCachedEpub(fileName: string): Promise<void> {
+  try {
+    await Filesystem.deleteFile({
+      path: fileName,
+      directory: Directory.Cache,
+    });
+  } catch {
+    // Ignore if already absent
+  }
+}
+
+/**
+ * Fast on-device update check for a downloaded novel in the Library.
+ */
+export async function nativeCheckNovelUpdate(
+  platform: Platform,
+  bookId: string,
+  domain?: string,
+  signal?: AbortSignal
+): Promise<NovelUpdateCheckResult> {
+  if (platform === "kakuyomu") {
+    const info = await nativeFetchKakuyomuInfo(bookId, signal);
+    const totalEpisodes = info.totalEpisodes || info.episodeUrls?.length || 0;
+    return {
+      title: info.title,
+      author: info.author,
+      domain: "kakuyomu.jp",
+      totalEpisodes,
+      status: info.status || "unknown",
+      remoteUpdatedAt: info.remoteUpdatedAt,
+    };
+  }
+
+  const normalizedId = bookId.toLowerCase();
+  const primaryDomain = canonicalizeNarouDomain(domain);
+  const domainsToTry = [
+    primaryDomain,
+    primaryDomain === "ncode.syosetu.com"
+      ? "novel18.syosetu.com"
+      : "ncode.syosetu.com",
+  ];
+
+  for (const currentDomain of domainsToTry) {
+    const meta = await nativeFetchNarouApiMeta(
+      normalizedId,
+      currentDomain,
+      signal
+    );
+    if (meta && meta.totalEpisodes > 0) {
+      return meta;
+    }
+  }
+
+  const info = await nativeFetchNarouInfo(normalizedId, primaryDomain, signal);
+  const totalEpisodes =
+    info.totalEpisodes || info.episodeUrls?.length || (info.isShortStory ? 1 : 0);
+
+  return {
+    title: info.title,
+    author: info.author,
+    domain: info.domain || primaryDomain,
+    totalEpisodes,
+    status: info.status || (info.isShortStory ? "short" : "unknown"),
+    isShortStory: info.isShortStory,
+    remoteUpdatedAt: info.remoteUpdatedAt,
+  };
 }
 
 /**
