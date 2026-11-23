@@ -18,8 +18,10 @@ A [Next.js](https://nextjs.org) web app and **native Android app (Capacitor)** t
 
 ## Features
 
-- **Concurrent Episode Downloading:** Extracts the complete episode list upfront (across all Narou paginated TOC pages and Kakuyomu's TOC) and downloads episodes in parallel (`1x` / `3x` / `5x` / `8x` concurrency selector, default `5x`) while preserving exact chapter order.
-- **Native Android App:** Runs 100% on-device via Capacitor (`CapacitorHttp` + `CapacitorCookies` + `Filesystem` + `Share`) — no server, no CORS, no cloud IP blocks, automatic `over18=yes` R18 age verification, Android Share Sheet support (**Share → Novel Downloader** from Chrome), and saves EPUBs to `Documents/NovelDownloader/`.
+- **Built-in Catalog & Search Explorer (Web & Android):** Browse daily/weekly/monthly/all-time rankings, recently updated works, and keyword search across all 5 supported sites (Shosetsuka ni Narou, Kakuyomu, Nocturne, Moonlight, and Midnight R18) with 1-tap EPUB download or queueing.
+- **Native Android In-App WebView Browser:** Browse the real novel websites directly inside the Android app with quick-switch site tabs, address bar, pre-seeded `over18=yes` R18 cookies, and an automatic bottom **Download EPUB / + Queue** bar whenever you visit any novel or episode page.
+- **Download Queue & Concurrent Episode Downloading:** Queue multiple novels from the Catalog or In-App Browser and batch-download them, extracting complete episode lists upfront and downloading in parallel (`1x` / `3x` / `5x` / `8x` concurrency selector, default `5x`) while preserving exact chapter order.
+- **Native Android App:** Runs 100% on-device via Capacitor (`CapacitorHttp` + `CapacitorCookies` + `Filesystem` + `Share` + custom `InternalBrowser` plugin) — no server, no CORS, no cloud IP blocks, Android Share Sheet support (**Share → Novel Downloader** from Chrome), and saves EPUBs to `Documents/NovelDownloader/`.
 - **Valid EPUB 3 Output:** Preserves `<ruby>` furigana and formatting, handles short stories (短編), and escapes all XML entities cleanly.
 
 ## Build Android APK Locally (Optional, requires Android SDK & JDK 21)
