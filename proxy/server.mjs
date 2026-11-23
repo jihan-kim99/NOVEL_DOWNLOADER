@@ -40,8 +40,64 @@ function isAllowedTarget(rawUrl) {
   }
 }
 
-async function fetchFollowingRedirects(initialUrl, userAgent, maxRedirects = 5) {
-  let currentUrl = initialUrl;
+function mergeCookies(...sources) {
+  const map = new Map();
+  for (const src of sources) {
+    if (!src) continue;
+    for (const part of src.split(";")) {
+      const trimmed = part.trim();
+      const eq = trimmed.indexOf("=");
+      if (eq > 0) {
+        map.set(trimmed.slice(0, eq).trim(), trimmed.slice(eq + 1).trim());
+      }
+    }
+  }
+  map.set("over18", "yes");
+  return Array.from(map.entries())
+    .map(([k, v]) => `${k}=${v}`)
+    .join("; ");
+}
+
+function extractSetCookies(headers) {
+  const rawList =
+    typeof headers.getSetCookie === "function"
+      ? headers.getSetCookie()
+      : (() => {
+          const single = headers.get("set-cookie");
+          return single ? single.split(/,(?=\s*[^;=]+=[^;]+)/) : [];
+        })();
+  return rawList
+    .map((raw) => raw.split(";")[0]?.trim())
+    .filter((pair) => pair && pair.includes("="))
+    .join("; ");
+}
+
+function normalizeSyosetuHttps(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (
+      parsed.protocol === "http:" &&
+      (parsed.hostname === "syosetu.com" ||
+        parsed.hostname.endsWith(".syosetu.com"))
+    ) {
+      parsed.protocol = "https:";
+    }
+    return parsed.toString();
+  } catch {
+    return rawUrl;
+  }
+}
+
+async function fetchFollowingRedirects(
+  initialUrl,
+  userAgent,
+  extraCookie = "",
+  maxRedirects = 5
+) {
+  let currentUrl = normalizeSyosetuHttps(initialUrl);
+  let accumulatedCookie = extraCookie;
+  let refererOverride = "";
+  let retriedSameAgeAuth = false;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const host = new URL(currentUrl).hostname.toLowerCase();
@@ -52,11 +108,13 @@ async function fetchFollowingRedirects(initialUrl, userAgent, maxRedirects = 5) 
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "ja,en-US;q=0.9,en;q=0.8",
-      Referer: isSyosetu ? "https://syosetu.com/" : "https://kakuyomu.jp/",
+      Referer:
+        refererOverride ||
+        (isSyosetu ? "https://syosetu.com/" : "https://kakuyomu.jp/"),
     };
 
     if (isSyosetu) {
-      headers.Cookie = "over18=yes";
+      headers.Cookie = mergeCookies(accumulatedCookie);
     }
 
     const res = await fetch(currentUrl, {
@@ -64,6 +122,13 @@ async function fetchFollowingRedirects(initialUrl, userAgent, maxRedirects = 5) 
       headers,
       signal: AbortSignal.timeout(20000),
     });
+
+    const newCookies = extractSetCookies(res.headers);
+    if (newCookies) {
+      accumulatedCookie = accumulatedCookie
+        ? `${accumulatedCookie}; ${newCookies}`
+        : newCookies;
+    }
 
     if (!REDIRECT_STATUSES.has(res.status)) {
       const body = await res.text();
@@ -87,11 +152,28 @@ async function fetchFollowingRedirects(initialUrl, userAgent, maxRedirects = 5) 
       };
     }
 
-    let nextUrl = new URL(location, currentUrl).toString();
+    let nextUrl = normalizeSyosetuHttps(
+      new URL(location, currentUrl).toString()
+    );
     if (nextUrl.includes("nl.syosetu.com/redirect/ageauth")) {
-      const unwrapped = new URL(nextUrl).searchParams.get("url");
+      const targetParam = new URL(nextUrl).searchParams.get("url");
+      const unwrapped = targetParam ? normalizeSyosetuHttps(targetParam) : null;
       if (unwrapped && unwrapped !== currentUrl) {
+        refererOverride = "https://nl.syosetu.com/";
         nextUrl = unwrapped;
+      } else if (unwrapped && !retriedSameAgeAuth) {
+        retriedSameAgeAuth = true;
+        refererOverride = "https://nl.syosetu.com/";
+        nextUrl = unwrapped;
+      } else {
+        return {
+          status: 403,
+          contentType: "application/json",
+          finalUrl: nextUrl,
+          body: JSON.stringify({
+            error: "Syosetu R18 age verification blocked this request.",
+          }),
+        };
       }
     }
 
@@ -156,7 +238,10 @@ const server = http.createServer(async (req, res) => {
         ? req.headers["user-agent"]
         : DEFAULT_UA;
 
-    const result = await fetchFollowingRedirects(targetUrl, ua);
+    const incomingCookie =
+      typeof req.headers["cookie"] === "string" ? req.headers["cookie"] : "";
+
+    const result = await fetchFollowingRedirects(targetUrl, ua, incomingCookie);
     res.writeHead(result.status, {
       "Content-Type": result.contentType,
       "X-Final-Url": result.finalUrl,

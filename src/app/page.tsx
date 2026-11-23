@@ -38,6 +38,7 @@ import {
   upsertLibraryNovel,
 } from "../lib/library-storage";
 import {
+  AgeAuthError,
   CloudBlockError,
   fetchWithFallback,
   probeBrowserBridge,
@@ -61,6 +62,25 @@ declare global {
 type AppTab = "catalog" | "library" | "browser" | "downloader";
 
 const QUEUE_STORAGE_KEY = "novel_downloader_queue_v1";
+const LATEST_BRIDGE_VERSION = "2.1.0";
+
+function isBridgeOutdated(version: string | null): boolean {
+  if (!version) return false;
+  const parse = (v: string) =>
+    v
+      .replace(/^v/i, "")
+      .split(".")
+      .map((n) => parseInt(n, 10) || 0);
+  const current = parse(version);
+  const target = parse(LATEST_BRIDGE_VERSION);
+  for (let i = 0; i < 3; i++) {
+    const a = current[i] || 0;
+    const b = target[i] || 0;
+    if (a < b) return true;
+    if (a > b) return false;
+  }
+  return false;
+}
 
 function normalizeEpisodeUrlKey(url: string): string {
   return url.trim().replace(/\/+$/, "").toLowerCase();
@@ -72,6 +92,9 @@ export default function Home() {
   const [status, setStatus] = useState("");
   const [isError, setIsError] = useState(false);
   const [cloudBlocked, setCloudBlocked] = useState(false);
+  const [ageAuthBlockedUrl, setAgeAuthBlockedUrl] = useState<string | null>(
+    null
+  );
   const [novelTitle, setNovelTitle] = useState("");
   const [novelAuthor, setNovelAuthor] = useState("");
   const [downloadedCount, setDownloadedCount] = useState(0);
@@ -387,6 +410,7 @@ export default function Home() {
       const forceFull = Boolean(options?.forceFull);
       setIsError(false);
       setCloudBlocked(false);
+      setAgeAuthBlockedUrl(null);
       setStatus("Initializing...");
       setNovelTitle("");
       setNovelAuthor("");
@@ -761,12 +785,23 @@ export default function Home() {
           return "cancelled";
         }
         console.error(error);
+        const message =
+          error instanceof Error ? error.message : "Unknown error occurred";
         if (error instanceof CloudBlockError) {
           setCloudBlocked(true);
           setShowBypassHelp(true);
+        } else if (
+          error instanceof AgeAuthError ||
+          /age verification/i.test(message)
+        ) {
+          const fallbackTarget =
+            error instanceof AgeAuthError && error.targetUrl
+              ? error.targetUrl
+              : /^https?:\/\//i.test(rawUrl.trim())
+              ? rawUrl.trim()
+              : "https://novel18.syosetu.com/";
+          setAgeAuthBlockedUrl(fallbackTarget);
         }
-        const message =
-          error instanceof Error ? error.message : "Unknown error occurred";
         setStatus(`Error: ${message}`);
         setIsError(true);
         return "error";
@@ -1438,7 +1473,7 @@ export default function Home() {
             {/* Connection Mode Info Banner */}
             <div
               className={`px-3.5 py-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
-                nativeMode || bridgeVersion
+                nativeMode || (bridgeVersion && !isBridgeOutdated(bridgeVersion))
                   ? "bg-emerald-50 border-emerald-200 text-emerald-800"
                   : "bg-amber-50 border-amber-200 text-amber-900"
               }`}
@@ -1446,7 +1481,8 @@ export default function Home() {
               <div className="flex items-center gap-2">
                 <span
                   className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                    nativeMode || bridgeVersion
+                    nativeMode ||
+                    (bridgeVersion && !isBridgeOutdated(bridgeVersion))
                       ? "bg-emerald-500"
                       : "bg-amber-500"
                   }`}
@@ -1455,6 +1491,15 @@ export default function Home() {
                   <span>
                     <strong>Native Android Mode</strong> — Direct device fetch
                     (no cloud IP blocks, R18 <code>over18=yes</code> enabled)
+                  </span>
+                ) : bridgeVersion && isBridgeOutdated(bridgeVersion) ? (
+                  <span>
+                    <strong>
+                      Browser Helper v{bridgeVersion} (Update Available → v
+                      {LATEST_BRIDGE_VERSION})
+                    </strong>{" "}
+                    — Reinstall the helper script and refresh this page to fix
+                    Syosetu R18 age verification cookies.
                   </span>
                 ) : bridgeVersion ? (
                   <span>
@@ -1470,6 +1515,18 @@ export default function Home() {
                   </span>
                 )}
               </div>
+              {!nativeMode &&
+                bridgeVersion &&
+                isBridgeOutdated(bridgeVersion) && (
+                  <a
+                    href="/novel-downloader.user.js"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="shrink-0 font-semibold text-indigo-700 underline hover:text-indigo-900"
+                  >
+                    Update v{LATEST_BRIDGE_VERSION}
+                  </a>
+                )}
               {!nativeMode && !bridgeVersion && (
                 <button
                   type="button"
@@ -1628,6 +1685,61 @@ export default function Home() {
                       {status}
                     </span>
                   </div>
+
+                  {!nativeMode && ageAuthBlockedUrl && (
+                    <div className="mt-2 p-3 rounded-lg bg-amber-50 border border-amber-200 text-xs text-amber-950 space-y-2">
+                      <p className="font-semibold">
+                        How to unlock Syosetu R18 (<code>over18=yes</code>):
+                      </p>
+                      <ol className="list-decimal list-inside space-y-1 text-amber-900">
+                        {(!bridgeVersion || isBridgeOutdated(bridgeVersion)) && (
+                          <li>
+                            Install/update the{" "}
+                            <strong>
+                              Helper Userscript v{LATEST_BRIDGE_VERSION}
+                            </strong>{" "}
+                            and refresh this tab.
+                          </li>
+                        )}
+                        <li>
+                          If using Violentmonkey, Safari Userscripts, or Chrome
+                          MV3 without <code>GM_cookie</code>, open{" "}
+                          <code>novel18.syosetu.com</code> once in your browser
+                          to save the 18+ cookie, then click Retry.
+                        </li>
+                      </ol>
+                      <div className="flex flex-wrap gap-2 pt-1">
+                        {(!bridgeVersion || isBridgeOutdated(bridgeVersion)) && (
+                          <a
+                            href="/novel-downloader.user.js"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="px-3 py-1.5 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700"
+                          >
+                            {bridgeVersion
+                              ? `Update Helper (v${LATEST_BRIDGE_VERSION})`
+                              : `Install Helper (v${LATEST_BRIDGE_VERSION})`}
+                          </a>
+                        )}
+                        <a
+                          href={ageAuthBlockedUrl}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="px-3 py-1.5 rounded-lg bg-amber-600 text-white font-semibold hover:bg-amber-700"
+                        >
+                          Open novel18.syosetu.com (Set 18+ Cookie)
+                        </a>
+                        <button
+                          type="button"
+                          disabled={loading || !input.trim()}
+                          onClick={() => startSingleDownload(input, false)}
+                          className="px-3 py-1.5 rounded-lg bg-purple-600 text-white font-semibold hover:bg-purple-700 disabled:opacity-50 cursor-pointer"
+                        >
+                          Retry Download
+                        </button>
+                      </div>
+                    </div>
+                  )}
 
                   {downloadedCount > 0 && (
                     <div className="mt-2">

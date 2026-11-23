@@ -16,9 +16,44 @@
   }
 
   const host = location.hostname.toLowerCase();
+  const isSyosetu = host === "syosetu.com" || host.endsWith(".syosetu.com");
   const isNarou =
     host === "ncode.syosetu.com" || host === "novel18.syosetu.com";
   const isKakuyomu = host === "kakuyomu.jp";
+
+  function setOver18Cookie() {
+    try {
+      const secureFlag = location.protocol === "https:" ? "; Secure" : "";
+      document.cookie =
+        "over18=yes; domain=.syosetu.com; path=/; max-age=31536000; SameSite=Lax" +
+        secureFlag;
+      document.cookie =
+        "over18=yes; path=/; max-age=31536000; SameSite=Lax" + secureFlag;
+    } catch {
+      // Ignore cookie write errors
+    }
+  }
+
+  if (isSyosetu && !isNarou) {
+    setOver18Cookie();
+    if (location.href.includes("nl.syosetu.com/redirect/ageauth")) {
+      const target = new URLSearchParams(location.search).get("url");
+      if (target) {
+        location.href = target.replace(/^http:\/\//i, "https://");
+        return;
+      }
+    }
+    const ncodeMatch = location.pathname.match(/\/(n\d{4}[a-z]{1,2})\b/i);
+    if (
+      ncodeMatch &&
+      (host === "noc.syosetu.com" ||
+        host === "mnlt.syosetu.com" ||
+        host === "mid.syosetu.com")
+    ) {
+      location.href = `https://novel18.syosetu.com/${ncodeMatch[1].toLowerCase()}/`;
+      return;
+    }
+  }
 
   if (!isNarou && !isKakuyomu) {
     alert(
@@ -223,11 +258,58 @@
     };
   }
 
-  async function fetchDoc(url, signal) {
-    const res = await fetch(url, { credentials: "include", signal });
+  function isAgeAuthDoc(doc, finalUrl) {
+    if (finalUrl && finalUrl.includes("nl.syosetu.com/redirect/ageauth")) {
+      return true;
+    }
+    const hasNovel =
+      !!doc.querySelector(".p-novel__title") ||
+      !!doc.querySelector(".p-novel__body") ||
+      !!doc.querySelector(".p-eplist") ||
+      !!doc.querySelector("#novel_honbun") ||
+      !!doc.querySelector(".novel_title") ||
+      !!doc.querySelector(".novel_view") ||
+      !!doc.querySelector(".novel_subtitle");
+    if (hasNovel) return false;
+    const html = doc.documentElement?.innerHTML || "";
+    return (
+      (doc.title || "").includes("年齢確認") ||
+      html.includes("nl.syosetu.com/redirect/ageauth")
+    );
+  }
+
+  async function fetchDoc(url, signal, retried) {
+    if (isNarou) {
+      setOver18Cookie();
+    }
+    let res;
+    try {
+      res = await fetch(url, { credentials: "include", signal });
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+      if (isNarou && !retried) {
+        setOver18Cookie();
+        return fetchDoc(url, signal, true);
+      }
+      throw new Error(
+        isNarou
+          ? "Syosetu R18 age verification blocked this request. Confirm 18+ on novel18.syosetu.com and reload the page, then run the downloader again."
+          : `Network error fetching ${url}`
+      );
+    }
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
     const html = await res.text();
-    return new DOMParser().parseFromString(html, "text/html");
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    if (isNarou && isAgeAuthDoc(doc, res.url)) {
+      if (!retried) {
+        setOver18Cookie();
+        return fetchDoc(url, signal, true);
+      }
+      throw new Error(
+        "Syosetu R18 age verification blocked this request. Reload this page after confirming 18+, then try again."
+      );
+    }
+    return doc;
   }
 
   function extractNarouTocLinks(doc, ncode) {
@@ -601,8 +683,7 @@ ${chapters
     try {
       if (isNarou) {
         // Ensure over18=yes cookie is set for novel18.syosetu.com
-        document.cookie =
-          "over18=yes; domain=.syosetu.com; path=/; max-age=31536000; SameSite=Lax";
+        setOver18Cookie();
       }
 
       ui.setStatus("Loading EPUB builder...");
@@ -616,10 +697,23 @@ ${chapters
         if (!m) throw new Error("Open a specific Narou / R18 novel page first.");
         bookId = m[1].toLowerCase();
         ui.setStatus("Fetching novel info...");
-        const infoDoc = await fetchDoc(
-          `${location.origin}/${bookId}/`,
-          controller.signal
-        );
+        const isAlreadyOnIndexPage =
+          new RegExp(`^/${bookId}/?$`, "i").test(location.pathname) &&
+          (!location.search || /[?&]p=1(?:&|$)/.test(location.search)) &&
+          !isAgeAuthDoc(document, location.href);
+        let infoDoc;
+        try {
+          infoDoc = await fetchDoc(
+            `${location.origin}/${bookId}/`,
+            controller.signal
+          );
+        } catch (err) {
+          if (isAlreadyOnIndexPage) {
+            infoDoc = document;
+          } else {
+            throw err;
+          }
+        }
         info = parseNarouInfoDoc(infoDoc, bookId);
       } else {
         const m = location.pathname.match(/\/works\/(\d+)/);

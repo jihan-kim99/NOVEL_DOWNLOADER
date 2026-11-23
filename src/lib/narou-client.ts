@@ -8,6 +8,15 @@ export class CloudBlockError extends Error {
   }
 }
 
+export class AgeAuthError extends Error {
+  targetUrl?: string;
+  constructor(message: string, targetUrl?: string) {
+    super(message);
+    this.name = "AgeAuthError";
+    this.targetUrl = targetUrl;
+  }
+}
+
 interface FetchRequestOptions {
   method?: string;
   headers?: Record<string, string>;
@@ -21,6 +30,11 @@ interface BridgeFetchResult {
   finalUrl: string;
   html: string;
   error?: string;
+  ageAuthBlocked?: boolean;
+}
+
+function isAgeVerificationErrorMessage(msg: string): boolean {
+  return /age verification/i.test(msg);
 }
 
 async function readErrorMessage(res: Response): Promise<string> {
@@ -115,6 +129,7 @@ export function fetchViaBrowserBridge(
         finalUrl: String(event.data.finalUrl || targetUrl),
         html: String(event.data.html || ""),
         error: event.data.error ? String(event.data.error) : undefined,
+        ageAuthBlocked: Boolean(event.data.ageAuthBlocked),
       });
     };
 
@@ -138,6 +153,7 @@ async function fetchAndParseViaBridge<T>(
   targetUrl: string
 ): Promise<T> {
   const originalBody = options.body ? JSON.parse(options.body) : {};
+  let effectiveTargetUrl = targetUrl;
   let res = await fetchViaBrowserBridge(targetUrl, options.signal);
 
   // Auto-fallback between ncode.syosetu.com and novel18.syosetu.com when info returns 404
@@ -155,20 +171,28 @@ async function fetchAndParseViaBridge<T>(
       originalBody.bookId
     ).toLowerCase()}/`;
     const altRes = await fetchViaBrowserBridge(altUrl, options.signal);
-    if (altRes.ok) {
+    if (altRes.ok || altRes.ageAuthBlocked) {
       res = altRes;
+      effectiveTargetUrl = altUrl;
     }
+  }
+
+  if (res.ageAuthBlocked) {
+    throw new AgeAuthError(
+      "Syosetu R18 age verification blocked this request.",
+      effectiveTargetUrl
+    );
   }
 
   if (!res.ok) {
     if (res.status === 404) {
       throw new Error(
-        `Novel or episode not found (404) at ${res.finalUrl || targetUrl}.`
+        `Novel or episode not found (404) at ${res.finalUrl || effectiveTargetUrl}.`
       );
     }
     throw new Error(
       res.error ||
-        `Browser Helper fetch failed with HTTP ${res.status} for ${targetUrl}`
+        `Browser Helper fetch failed with HTTP ${res.status} for ${effectiveTargetUrl}`
     );
   }
 
@@ -186,6 +210,9 @@ async function fetchAndParseViaBridge<T>(
 
   if (!parseRes.ok) {
     const parseErr = await readErrorMessage(parseRes);
+    if (isAgeVerificationErrorMessage(parseErr)) {
+      throw new AgeAuthError(parseErr, effectiveTargetUrl);
+    }
     throw new Error(parseErr);
   }
 
@@ -212,6 +239,12 @@ async function fetchAndParseViaBridge<T>(
           const pageNum = pageNums[idx];
           const tocUrl = `https://${info.domain}/${normalizedId}/?p=${pageNum}`;
           const tocRes = await fetchViaBrowserBridge(tocUrl, options.signal);
+          if (tocRes.ageAuthBlocked) {
+            throw new AgeAuthError(
+              "Syosetu R18 age verification blocked this request.",
+              tocUrl
+            );
+          }
           if (tocRes.ok) {
             const { episodeUrls } = extractNarouTocPage(
               tocRes.html,
@@ -286,6 +319,10 @@ export async function fetchWithFallback<T>(
       fallbackType,
       targetUrl
     );
+  }
+
+  if (isAgeVerificationErrorMessage(errorMessage)) {
+    throw new AgeAuthError(errorMessage, targetUrl);
   }
 
   // If server got 403 without Browser Helper, surface a clear actionable CloudBlockError
