@@ -1,3 +1,10 @@
+export class CloudBlockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CloudBlockError";
+  }
+}
+
 interface FetchRequestOptions {
   method?: string;
   headers?: Record<string, string>;
@@ -5,10 +12,12 @@ interface FetchRequestOptions {
   signal?: AbortSignal;
 }
 
-function isAbortError(err: unknown): boolean {
-  return (
-    err instanceof DOMException && err.name === "AbortError"
-  ) || (err instanceof Error && err.name === "AbortError");
+interface BridgeFetchResult {
+  ok: boolean;
+  status: number;
+  finalUrl: string;
+  html: string;
+  error?: string;
 }
 
 async function readErrorMessage(res: Response): Promise<string> {
@@ -23,123 +32,143 @@ async function readErrorMessage(res: Response): Promise<string> {
   return `Request failed with status ${res.status}`;
 }
 
-async function fetchViaCorsProxies(
-  targetUrl: string,
-  signal?: AbortSignal
-): Promise<string> {
-  const attempts: Array<{
-    name: string;
-    run: () => Promise<string>;
-  }> = [
-    {
-      name: "allorigins-raw",
-      run: async () => {
-        const res = await fetch(
-          `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
-          { signal }
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.text();
-      },
-    },
-    {
-      name: "allorigins-json",
-      run: async () => {
-        const res = await fetch(
-          `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
-          { signal }
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        return typeof data?.contents === "string" ? data.contents : "";
-      },
-    },
-    {
-      name: "codetabs",
-      run: async () => {
-        const res = await fetch(
-          `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
-            targetUrl
-          )}`,
-          { signal }
-        );
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.text();
-      },
-    },
-  ];
+/**
+ * Probes whether the Novel Downloader Helper userscript bridge is active in this tab.
+ */
+export function probeBrowserBridge(timeoutMs = 500): Promise<string | null> {
+  if (typeof window === "undefined") return Promise.resolve(null);
 
-  for (const attempt of attempts) {
-    try {
-      const html = await attempt.run();
-      if (html && html.trim().length > 0) {
-        return html;
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (version: string | null) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onMessage);
+      clearTimeout(timer);
+      resolve(version);
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      if (
+        event.source === window &&
+        event.data &&
+        event.data.type === "NOVEL_DL_PONG"
+      ) {
+        finish(String(event.data.version || "1.0.0"));
       }
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      console.warn(`CORS proxy "${attempt.name}" failed:`, err);
-    }
-  }
+    };
 
-  throw new Error(
-    "All client-side CORS proxies failed to fetch content. Try unchecking Force Client-Side Download to use the server."
-  );
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    window.addEventListener("message", onMessage);
+    window.postMessage({ type: "NOVEL_DL_PING" }, "*");
+  });
 }
 
-export async function fetchWithFallback<T>(
+/**
+ * Fetches a target URL directly through the user's browser via the Helper Userscript
+ * (GM_xmlhttpRequest with user's residential IP + over18=yes cookie, bypassing CORS & cloud IP blocks).
+ */
+export function fetchViaBrowserBridge(
+  targetUrl: string,
+  signal?: AbortSignal
+): Promise<BridgeFetchResult> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new DOMException("Download cancelled", "AbortError"));
+      return;
+    }
+
+    const id = `ndl_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+    let settled = false;
+
+    const cleanup = () => {
+      window.removeEventListener("message", onMessage);
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+    };
+
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new DOMException("Download cancelled", "AbortError"));
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      if (
+        event.source !== window ||
+        !event.data ||
+        event.data.type !== "NOVEL_DL_FETCH_RES" ||
+        event.data.id !== id
+      ) {
+        return;
+      }
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve({
+        ok: Boolean(event.data.ok),
+        status: Number(event.data.status || 0),
+        finalUrl: String(event.data.finalUrl || targetUrl),
+        html: String(event.data.html || ""),
+        error: event.data.error ? String(event.data.error) : undefined,
+      });
+    };
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("Browser Helper request timed out."));
+    }, 30000);
+
+    signal?.addEventListener("abort", onAbort, { once: true });
+    window.addEventListener("message", onMessage);
+    window.postMessage({ type: "NOVEL_DL_FETCH_REQ", id, url: targetUrl }, "*");
+  });
+}
+
+async function fetchAndParseViaBridge<T>(
   apiEndpoint: string,
   options: FetchRequestOptions,
   fallbackType: "parse-info" | "parse-episode",
-  fallbackUrl: string,
-  setStatus: (status: string) => void,
-  forceClientSide: boolean = false,
-  onFallback?: () => void
+  targetUrl: string
 ): Promise<T> {
-  let useFallback = forceClientSide;
+  const originalBody = options.body ? JSON.parse(options.body) : {};
+  let res = await fetchViaBrowserBridge(targetUrl, options.signal);
 
-  if (!useFallback) {
-    try {
-      const res = await fetch(apiEndpoint, options);
-      if (res.ok) {
-        return (await res.json()) as T;
-      }
-
-      const errorMessage = await readErrorMessage(res);
-
-      // Do not fall back to CORS proxies on client/not-found errors (e.g. bad URL or 404)
-      if (res.status === 400 || res.status === 404) {
-        throw new Error(errorMessage);
-      }
-
-      // 403 (IP block), 429, or 5xx: fall back to client-side proxy
-      console.warn(
-        `Primary server fetch returned ${res.status}: ${errorMessage}`
-      );
-      setStatus("Server fetch blocked/failed, trying client-side fallback...");
-      useFallback = true;
-      if (onFallback) onFallback();
-    } catch (err) {
-      if (isAbortError(err)) throw err;
-      // Re-throw non-network explicit 400/404 errors thrown above
-      if (
-        err instanceof Error &&
-        !useFallback &&
-        err.name !== "TypeError"
-      ) {
-        throw err;
-      }
-      if (!useFallback) {
-        console.warn("Primary fetch network error, trying fallback...", err);
-        setStatus("Server unreachable, trying client-side fallback...");
-        useFallback = true;
-        if (onFallback) onFallback();
-      }
+  // Auto-fallback between ncode.syosetu.com and novel18.syosetu.com when info returns 404
+  if (
+    !res.ok &&
+    res.status === 404 &&
+    fallbackType === "parse-info" &&
+    originalBody.platform === "narou" &&
+    originalBody.bookId
+  ) {
+    const altDomain = targetUrl.includes("novel18.syosetu.com")
+      ? "ncode.syosetu.com"
+      : "novel18.syosetu.com";
+    const altUrl = `https://${altDomain}/${String(
+      originalBody.bookId
+    ).toLowerCase()}/`;
+    const altRes = await fetchViaBrowserBridge(altUrl, options.signal);
+    if (altRes.ok) {
+      res = altRes;
     }
   }
 
-  const html = await fetchViaCorsProxies(fallbackUrl, options.signal);
+  if (!res.ok) {
+    if (res.status === 404) {
+      throw new Error(
+        `Novel or episode not found (404) at ${res.finalUrl || targetUrl}.`
+      );
+    }
+    throw new Error(
+      res.error ||
+        `Browser Helper fetch failed with HTTP ${res.status} for ${targetUrl}`
+    );
+  }
 
-  const originalBody = options.body ? JSON.parse(options.body) : {};
   const parseRes = await fetch(apiEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -147,7 +176,8 @@ export async function fetchWithFallback<T>(
     body: JSON.stringify({
       ...originalBody,
       type: fallbackType,
-      html,
+      html: res.html,
+      finalUrl: res.finalUrl,
     }),
   });
 
@@ -157,4 +187,53 @@ export async function fetchWithFallback<T>(
   }
 
   return (await parseRes.json()) as T;
+}
+
+export async function fetchWithFallback<T>(
+  apiEndpoint: string,
+  options: FetchRequestOptions,
+  fallbackType: "parse-info" | "parse-episode",
+  targetUrl: string,
+  setStatus: (status: string) => void,
+  preferBrowserBridge: boolean = false,
+  bridgeAvailable: boolean = false
+): Promise<T> {
+  // 1. If Browser Helper Bridge is installed and preferred (e.g. Narou/R18 or forced),
+  //    fetch directly through user's residential IP + over18=yes cookie!
+  if (bridgeAvailable && preferBrowserBridge) {
+    return fetchAndParseViaBridge<T>(
+      apiEndpoint,
+      options,
+      fallbackType,
+      targetUrl
+    );
+  }
+
+  // 2. Try server-side fetch (works locally, on Kakuyomu, or with SYOSETU_PROXY_URL)
+  const res = await fetch(apiEndpoint, options);
+  if (res.ok) {
+    return (await res.json()) as T;
+  }
+
+  const errorMessage = await readErrorMessage(res);
+
+  // If server got blocked (403 / 5xx) and Browser Helper Bridge is available, switch to it seamlessly!
+  if ((res.status === 403 || res.status >= 500) && bridgeAvailable) {
+    setStatus("Server blocked by website, switching to Browser Helper...");
+    return fetchAndParseViaBridge<T>(
+      apiEndpoint,
+      options,
+      fallbackType,
+      targetUrl
+    );
+  }
+
+  // If server got 403 without Browser Helper, surface a clear actionable CloudBlockError
+  if (res.status === 403) {
+    throw new CloudBlockError(
+      "Syosetu blocked this server's cloud IP (403 Forbidden). Install the 1-click Browser Helper Userscript or use the Bookmarklet below so downloads run from your own browser IP & cookies."
+    );
+  }
+
+  throw new Error(errorMessage);
 }

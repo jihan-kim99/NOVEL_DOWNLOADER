@@ -26,7 +26,7 @@ function isAllowedSyosetuUrl(rawUrl: string): boolean {
 export async function POST(request: Request) {
   try {
     const body = await request.json();
-    const { type, bookId, url, domain, explicitDomain, html } = body;
+    const { type, bookId, url, domain, explicitDomain, html, finalUrl } = body;
     const userAgent = body.userAgent || getRandomUserAgent();
 
     if (type === "info") {
@@ -65,8 +65,21 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const canonicalDomain = canonicalizeNarouDomain(domain);
-      const data = parseNarouInfo(html, bookId, canonicalDomain, userAgent);
+      let resolvedDomain = canonicalizeNarouDomain(domain);
+      if (typeof finalUrl === "string" && finalUrl) {
+        try {
+          resolvedDomain = canonicalizeNarouDomain(new URL(finalUrl).hostname);
+        } catch {
+          // Keep existing domain
+        }
+      }
+      const data = parseNarouInfo(
+        html,
+        bookId,
+        resolvedDomain,
+        userAgent,
+        typeof finalUrl === "string" ? finalUrl : undefined
+      );
       return NextResponse.json(data);
     }
 
@@ -77,7 +90,9 @@ export async function POST(request: Request) {
           { status: 400 }
         );
       }
-      const data = parseNarouEpisode(html, url);
+      const effectiveUrl =
+        typeof finalUrl === "string" && finalUrl ? finalUrl : url;
+      const data = parseNarouEpisode(html, effectiveUrl, effectiveUrl);
       return NextResponse.json(data);
     }
 

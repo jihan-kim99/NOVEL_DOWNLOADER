@@ -198,6 +198,18 @@ export async function fetchNarouPage(
   extraCookie?: string,
   maxRedirects = 5
 ): Promise<{ response: Response; finalUrl: string }> {
+  const customProxyTemplate =
+    process.env.SYOSETU_PROXY_URL || process.env.FETCH_PROXY_URL;
+  if (customProxyTemplate) {
+    const proxiedUrl = customProxyTemplate.includes("{url}")
+      ? customProxyTemplate.replace("{url}", encodeURIComponent(initialUrl))
+      : `${customProxyTemplate}${encodeURIComponent(initialUrl)}`;
+    const response = await fetchWithRetry(proxiedUrl, {
+      headers: buildNarouHeaders(userAgent, extraCookie),
+    });
+    return { response, finalUrl: initialUrl };
+  }
+
   let currentUrl = initialUrl;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {

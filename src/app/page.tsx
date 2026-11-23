@@ -1,13 +1,17 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   buildChapterXhtml,
   Chapter,
   generateEpub,
   initializeEpub,
 } from "../lib/epub";
-import { fetchWithFallback } from "../lib/narou-client";
+import {
+  CloudBlockError,
+  fetchWithFallback,
+  probeBrowserBridge,
+} from "../lib/narou-client";
 import { parseNovelInput } from "../lib/url-parser";
 import type { Episode, NovelInfo } from "../types";
 
@@ -15,14 +19,59 @@ export default function Home() {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
   const [isError, setIsError] = useState(false);
+  const [cloudBlocked, setCloudBlocked] = useState(false);
   const [novelTitle, setNovelTitle] = useState("");
   const [novelAuthor, setNovelAuthor] = useState("");
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [totalEpisodes, setTotalEpisodes] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
-  const [forceClientSide, setForceClientSide] = useState(false);
+  const [bridgeVersion, setBridgeVersion] = useState<string | null>(null);
+  const [useBridgeForAll, setUseBridgeForAll] = useState(false);
+  const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
+  const [showBypassHelp, setShowBypassHelp] = useState(false);
 
   const abortControllerRef = useRef<AbortController | null>(null);
+
+  const attachBookmarkletHref = (el: HTMLAnchorElement | null) => {
+    if (!el || typeof window === "undefined") return;
+    const code = `javascript:(function(){var s=document.createElement('script');s.src='${window.location.origin}/bookmarklet.js?t='+Date.now();document.head.appendChild(s);})();`;
+    el.setAttribute("href", code);
+  };
+
+  useEffect(() => {
+    let active = true;
+
+    const onMessage = (event: MessageEvent) => {
+      if (
+        event.source === window &&
+        event.data &&
+        event.data.type === "NOVEL_DL_PONG"
+      ) {
+        setBridgeVersion(String(event.data.version || "2.0.0"));
+      }
+    };
+
+    window.addEventListener("message", onMessage);
+    probeBrowserBridge(600).then((ver) => {
+      if (active && ver) setBridgeVersion(ver);
+    });
+
+    return () => {
+      active = false;
+      window.removeEventListener("message", onMessage);
+    };
+  }, []);
+
+  const handleCopyBookmarklet = async () => {
+    const code = `javascript:(function(){var s=document.createElement('script');s.src='${window.location.origin}/bookmarklet.js?t='+Date.now();document.head.appendChild(s);})();`;
+    try {
+      await navigator.clipboard.writeText(code);
+      setCopiedBookmarklet(true);
+      setTimeout(() => setCopiedBookmarklet(false), 2000);
+    } catch {
+      // Fallback ignored
+    }
+  };
 
   const handleCancel = () => {
     abortControllerRef.current?.abort();
@@ -32,6 +81,7 @@ export default function Home() {
     e.preventDefault();
     setLoading(true);
     setIsError(false);
+    setCloudBlocked(false);
     setStatus("Initializing...");
     setNovelTitle("");
     setNovelAuthor("");
@@ -41,20 +91,22 @@ export default function Home() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
 
-    let currentUseClientSide = forceClientSide;
-    const enableClientSide = () => {
-      currentUseClientSide = true;
-      setForceClientSide(true);
-    };
-
     try {
       const parsed = parseNovelInput(input);
       const { platform, bookId, explicitDomain, siteLabel } = parsed;
       let domain = parsed.domain;
 
       const apiEndpoint = platform === "narou" ? "/api/narou" : "/api/kakuyomu";
+      const bridgeAvailable = Boolean(bridgeVersion);
+      // Always prefer the Browser Helper for Narou/R18 when installed so Vercel's IP is never hit
+      const preferBridge =
+        bridgeAvailable && (platform === "narou" || useBridgeForAll);
 
-      setStatus(`Fetching novel info from ${siteLabel}...`);
+      setStatus(
+        preferBridge
+          ? `Fetching novel info from ${siteLabel} via Browser Helper...`
+          : `Fetching novel info from ${siteLabel}...`
+      );
 
       const targetUrlForInfo =
         platform === "narou"
@@ -78,8 +130,8 @@ export default function Home() {
         "parse-info",
         targetUrlForInfo,
         setStatus,
-        currentUseClientSide,
-        enableClientSide
+        preferBridge,
+        bridgeAvailable
       );
 
       if (info.domain) {
@@ -130,8 +182,8 @@ export default function Home() {
           "parse-episode",
           currentUrl,
           setStatus,
-          currentUseClientSide,
-          enableClientSide
+          preferBridge,
+          bridgeAvailable
         );
 
         if (!ep.content) {
@@ -146,10 +198,9 @@ export default function Home() {
         currentUrl = ep.nextUrl;
         episodeNum++;
 
-        // Polite short delay between episodes to avoid rate limiting
         if (currentUrl) {
           await new Promise<void>((resolve, reject) => {
-            const timer = setTimeout(resolve, 150);
+            const timer = setTimeout(resolve, 200);
             controller.signal.addEventListener(
               "abort",
               () => {
@@ -180,6 +231,10 @@ export default function Home() {
         setIsError(false);
       } else {
         console.error(error);
+        if (error instanceof CloudBlockError) {
+          setCloudBlocked(true);
+          setShowBypassHelp(true);
+        }
         const message =
           error instanceof Error ? error.message : "Unknown error occurred";
         setStatus(`Error: ${message}`);
@@ -202,12 +257,50 @@ export default function Home() {
         <h1 className="text-3xl font-extrabold text-center mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
           Novel Downloader
         </h1>
-        <p className="text-xs text-center text-gray-500 mb-6">
+        <p className="text-xs text-center text-gray-500 mb-5">
           Supports Kakuyomu, Shosetsuka ni Narou (ncode), and Narou R18
           (Nocturne / Moonlight / Midnight — novel18)
         </p>
 
-        <form onSubmit={handleDownload} className="flex flex-col gap-6">
+        {/* Browser Helper Status Banner */}
+        <div
+          className={`mb-5 px-3.5 py-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
+            bridgeVersion
+              ? "bg-emerald-50 border-emerald-200 text-emerald-800"
+              : "bg-amber-50 border-amber-200 text-amber-900"
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            <span
+              className={`w-2.5 h-2.5 rounded-full shrink-0 ${
+                bridgeVersion ? "bg-emerald-500" : "bg-amber-500"
+              }`}
+            />
+            {bridgeVersion ? (
+              <span>
+                <strong>Browser Helper Active (v{bridgeVersion})</strong> —
+                Narou &amp; R18 fetch directly via your browser IP &amp;
+                over18 cookie
+              </span>
+            ) : (
+              <span>
+                <strong>Server Mode</strong> — Syosetu blocks Vercel/cloud IPs.
+                For Narou &amp; R18, enable the browser helper.
+              </span>
+            )}
+          </div>
+          {!bridgeVersion && (
+            <button
+              type="button"
+              onClick={() => setShowBypassHelp((v) => !v)}
+              className="shrink-0 font-semibold text-purple-700 underline hover:text-purple-900"
+            >
+              {showBypassHelp ? "Hide" : "Setup"}
+            </button>
+          )}
+        </div>
+
+        <form onSubmit={handleDownload} className="flex flex-col gap-5">
           <div className="flex flex-col gap-2">
             <label
               htmlFor="url"
@@ -215,34 +308,34 @@ export default function Home() {
             >
               Novel URL or ID
             </label>
-            <div className="relative">
-              <input
-                id="url"
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="kakuyomu.jp/works/..., ncode.syosetu.com/..., novel18.syosetu.com/..."
-                className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all text-gray-800 placeholder-gray-400"
-                required
-              />
-            </div>
+            <input
+              id="url"
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              placeholder="kakuyomu.jp/works/..., ncode.syosetu.com/..., novel18.syosetu.com/..."
+              className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all text-gray-800 placeholder-gray-400"
+              required
+            />
           </div>
 
-          <div className="flex items-center gap-2">
-            <input
-              id="forceClientSide"
-              type="checkbox"
-              checked={forceClientSide}
-              onChange={(e) => setForceClientSide(e.target.checked)}
-              className="w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 focus:ring-2"
-            />
-            <label
-              htmlFor="forceClientSide"
-              className="text-sm font-medium text-gray-700"
-            >
-              Force Client-Side Proxy (not recommended for R18 novel18)
-            </label>
-          </div>
+          {bridgeVersion && (
+            <div className="flex items-center gap-2">
+              <input
+                id="useBridgeForAll"
+                type="checkbox"
+                checked={useBridgeForAll}
+                onChange={(e) => setUseBridgeForAll(e.target.checked)}
+                className="w-4 h-4 text-purple-600 bg-gray-100 border-gray-300 rounded focus:ring-purple-500 focus:ring-2"
+              />
+              <label
+                htmlFor="useBridgeForAll"
+                className="text-sm font-medium text-gray-700"
+              >
+                Also use Browser Helper for Kakuyomu
+              </label>
+            </div>
+          )}
 
           <div className="flex gap-2">
             <button
@@ -292,13 +385,13 @@ export default function Home() {
         </form>
 
         {(novelTitle || status) && (
-          <div className="mt-8 p-6 bg-gray-50 rounded-xl border border-gray-100 shadow-inner">
+          <div className="mt-6 p-5 bg-gray-50 rounded-xl border border-gray-100 shadow-inner">
             {novelTitle && (
               <div className="mb-4 pb-4 border-b border-gray-200">
-                <h2 className="text-sm text-gray-500 uppercase tracking-wide font-semibold mb-1">
+                <h2 className="text-xs text-gray-500 uppercase tracking-wide font-semibold mb-1">
                   Target Novel
                 </h2>
-                <p className="text-xl font-bold text-gray-800">{novelTitle}</p>
+                <p className="text-lg font-bold text-gray-800">{novelTitle}</p>
                 {novelAuthor && (
                   <p className="text-sm text-gray-500 mt-1">{novelAuthor}</p>
                 )}
@@ -346,6 +439,101 @@ export default function Home() {
                   </div>
                 </div>
               )}
+            </div>
+          </div>
+        )}
+
+        {/* Cloud-IP / R18 Age-Verification Bypass Helper Panel */}
+        {(showBypassHelp || cloudBlocked) && !bridgeVersion && (
+          <div
+            className={`mt-6 p-5 rounded-xl border text-xs space-y-4 ${
+              cloudBlocked
+                ? "bg-red-50 border-red-200 text-gray-800"
+                : "bg-indigo-50/70 border-indigo-200 text-gray-800"
+            }`}
+          >
+            <div>
+              <h3 className="text-sm font-bold text-gray-900 mb-1">
+                Bypass Narou Cloud-IP Blocks &amp; R18 Age Verification
+              </h3>
+              <p className="text-gray-600 leading-relaxed">
+                Syosetu blocks datacenter IPs (like Vercel/AWS) and public CORS
+                proxies cannot send the <code>over18=yes</code> cookie. Use
+                either option below so requests run directly from your own
+                browser IP:
+              </p>
+            </div>
+
+            <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-2">
+              <div className="font-bold text-gray-900">
+                Option 1: Install Helper Userscript (Best — works right in this
+                page)
+              </div>
+              <p className="text-gray-600">
+                Requires{" "}
+                <a
+                  href="https://www.tampermonkey.net/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-600 underline"
+                >
+                  Tampermonkey
+                </a>{" "}
+                or{" "}
+                <a
+                  href="https://violentmonkey.github.io/"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-600 underline"
+                >
+                  Violentmonkey
+                </a>
+                . After installing, refresh this page — Narou &amp; R18 will
+                download directly through your browser, plus a{" "}
+                <strong>Download EPUB</strong> button appears on novel pages.
+              </p>
+              <a
+                href="/novel-downloader.user.js"
+                target="_blank"
+                rel="noreferrer"
+                className="inline-block bg-indigo-600 text-white font-semibold px-3.5 py-2 rounded-lg hover:bg-indigo-700 transition-colors"
+              >
+                Install Helper Userscript (.user.js)
+              </a>
+            </div>
+
+            <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-2">
+              <div className="font-bold text-gray-900">
+                Option 2: Zero-Extension Bookmarklet
+              </div>
+              <p className="text-gray-600">
+                Drag this button to your bookmarks bar. Then open any novel on{" "}
+                <code>ncode.syosetu.com</code>,{" "}
+                <code>novel18.syosetu.com</code>, or <code>kakuyomu.jp</code>{" "}
+                and click the bookmark to download the EPUB directly:
+              </p>
+              <div className="flex items-center gap-2 flex-wrap">
+                <a
+                  ref={attachBookmarkletHref}
+                  href="#bookmarklet"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    alert(
+                      "Drag this button to your browser's bookmarks bar, then click it while viewing a novel on Narou, novel18, or Kakuyomu."
+                    );
+                  }}
+                  className="inline-block bg-purple-600 text-white font-semibold px-3.5 py-2 rounded-lg hover:bg-purple-700 cursor-grab transition-colors"
+                >
+                  Download Novel EPUB
+                </a>
+                <button
+                  type="button"
+                  onClick={handleCopyBookmarklet}
+                  className="px-3 py-2 rounded-lg border border-gray-300 bg-gray-50 hover:bg-gray-100 font-medium text-gray-700"
+                >
+                  {copiedBookmarklet ? "Copied!" : "Copy Bookmarklet Code"}
+                </button>
+              </div>
             </div>
           </div>
         )}
