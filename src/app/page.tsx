@@ -2,6 +2,16 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  isNativeApp,
+  nativeFetchKakuyomuEpisode,
+  nativeFetchKakuyomuInfo,
+  nativeFetchNarouEpisode,
+  nativeFetchNarouInfo,
+  nativeSaveEpub,
+  nativeShareEpub,
+  type NativeSavedFile,
+} from "../lib/capacitor-native";
+import {
   buildChapterXhtml,
   Chapter,
   generateEpub,
@@ -15,6 +25,12 @@ import {
 import { parseNovelInput } from "../lib/url-parser";
 import type { Episode, NovelInfo } from "../types";
 
+declare global {
+  interface Window {
+    __SHARED_NOVEL_URL__?: string;
+  }
+}
+
 export default function Home() {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
@@ -25,6 +41,7 @@ export default function Home() {
   const [downloadedCount, setDownloadedCount] = useState(0);
   const [totalEpisodes, setTotalEpisodes] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
+  const [nativeMode, setNativeMode] = useState(false);
   const [bridgeVersion, setBridgeVersion] = useState<string | null>(null);
   const [useBridgeForAll, setUseBridgeForAll] = useState(false);
   const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
@@ -34,6 +51,7 @@ export default function Home() {
     blob: Blob;
     fileName: string;
   } | null>(null);
+  const [nativeSaved, setNativeSaved] = useState<NativeSavedFile | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -45,6 +63,32 @@ export default function Home() {
 
   useEffect(() => {
     let active = true;
+    const isNative = isNativeApp();
+
+    if (isNative) {
+      // Defer state update slightly or keep clean inside effect callback
+      queueMicrotask(() => {
+        if (!active) return;
+        setNativeMode(true);
+        if (window.__SHARED_NOVEL_URL__) {
+          setInput(window.__SHARED_NOVEL_URL__);
+          delete window.__SHARED_NOVEL_URL__;
+        }
+      });
+
+      const onSharedUrl = (event: Event) => {
+        const detail = (event as CustomEvent<string>).detail;
+        if (typeof detail === "string" && detail.trim()) {
+          setInput(detail.trim());
+        }
+      };
+
+      window.addEventListener("novel-shared-url", onSharedUrl);
+      return () => {
+        active = false;
+        window.removeEventListener("novel-shared-url", onSharedUrl);
+      };
+    }
 
     const onMessage = (event: MessageEvent) => {
       if (
@@ -76,6 +120,15 @@ export default function Home() {
   }, [readyEpub]);
 
   const handleShareEpub = async () => {
+    if (nativeSaved) {
+      try {
+        await nativeShareEpub(nativeSaved);
+      } catch {
+        // User cancelled share sheet
+      }
+      return;
+    }
+
     if (!readyEpub || typeof navigator === "undefined" || !navigator.share) {
       return;
     }
@@ -114,6 +167,7 @@ export default function Home() {
     setNovelAuthor("");
     setDownloadedCount(0);
     setTotalEpisodes(null);
+    setNativeSaved(null);
     setReadyEpub((prev) => {
       if (prev) URL.revokeObjectURL(prev.url);
       return null;
@@ -129,41 +183,50 @@ export default function Home() {
 
       const apiEndpoint = platform === "narou" ? "/api/narou" : "/api/kakuyomu";
       const bridgeAvailable = Boolean(bridgeVersion);
-      // Always prefer the Browser Helper for Narou/R18 when installed so Vercel's IP is never hit
       const preferBridge =
         bridgeAvailable && (platform === "narou" || useBridgeForAll);
 
       setStatus(
-        preferBridge
+        nativeMode
+          ? `Fetching novel info from ${siteLabel} directly...`
+          : preferBridge
           ? `Fetching novel info from ${siteLabel} via Browser Helper...`
           : `Fetching novel info from ${siteLabel}...`
       );
 
-      const targetUrlForInfo =
-        platform === "narou"
-          ? `https://${domain}/${bookId}/`
-          : `https://kakuyomu.jp/works/${bookId}`;
+      let info: NovelInfo;
+      if (nativeMode) {
+        info =
+          platform === "narou"
+            ? await nativeFetchNarouInfo(bookId, domain, controller.signal)
+            : await nativeFetchKakuyomuInfo(bookId, controller.signal);
+      } else {
+        const targetUrlForInfo =
+          platform === "narou"
+            ? `https://${domain}/${bookId}/`
+            : `https://kakuyomu.jp/works/${bookId}`;
 
-      const info = await fetchWithFallback<NovelInfo>(
-        apiEndpoint,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          signal: controller.signal,
-          body: JSON.stringify({
-            type: "info",
-            bookId,
-            platform,
-            domain,
-            explicitDomain,
-          }),
-        },
-        "parse-info",
-        targetUrlForInfo,
-        setStatus,
-        preferBridge,
-        bridgeAvailable
-      );
+        info = await fetchWithFallback<NovelInfo>(
+          apiEndpoint,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
+            body: JSON.stringify({
+              type: "info",
+              bookId,
+              platform,
+              domain,
+              explicitDomain,
+            }),
+          },
+          "parse-info",
+          targetUrlForInfo,
+          setStatus,
+          preferBridge,
+          bridgeAvailable
+        );
+      }
 
       if (info.domain) {
         domain = info.domain;
@@ -196,26 +259,34 @@ export default function Home() {
             : `Downloading episode ${episodeNum}...`
         );
 
-        const ep: Episode = await fetchWithFallback<Episode>(
-          apiEndpoint,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            signal: controller.signal,
-            body: JSON.stringify({
-              type: "episode",
-              url: currentUrl,
-              userAgent: info.userAgent,
-              platform,
-              domain,
-            }),
-          },
-          "parse-episode",
-          currentUrl,
-          setStatus,
-          preferBridge,
-          bridgeAvailable
-        );
+        let ep: Episode;
+        if (nativeMode) {
+          ep =
+            platform === "narou"
+              ? await nativeFetchNarouEpisode(currentUrl, controller.signal)
+              : await nativeFetchKakuyomuEpisode(currentUrl, controller.signal);
+        } else {
+          ep = await fetchWithFallback<Episode>(
+            apiEndpoint,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              signal: controller.signal,
+              body: JSON.stringify({
+                type: "episode",
+                url: currentUrl,
+                userAgent: info.userAgent,
+                platform,
+                domain,
+              }),
+            },
+            "parse-episode",
+            currentUrl,
+            setStatus,
+            preferBridge,
+            bridgeAvailable
+          );
+        }
 
         if (!ep.content) {
           break;
@@ -256,14 +327,25 @@ export default function Home() {
         bookId,
         chapters,
         zip,
-        info.author
+        info.author,
+        !nativeMode
       );
-      setReadyEpub({
-        url: URL.createObjectURL(generated.blob),
-        blob: generated.blob,
-        fileName: generated.fileName,
-      });
-      setStatus(`Download complete! (${chapters.length} episodes saved)`);
+
+      if (nativeMode) {
+        setStatus("Saving EPUB to device...");
+        const saved = await nativeSaveEpub(generated.blob, generated.fileName);
+        setNativeSaved(saved);
+        setStatus(
+          `Saved to ${saved.documentsPath} (${chapters.length} episodes)`
+        );
+      } else {
+        setReadyEpub({
+          url: URL.createObjectURL(generated.blob),
+          blob: generated.blob,
+          fileName: generated.fileName,
+        });
+        setStatus(`Download complete! (${chapters.length} episodes saved)`);
+      }
     } catch (error: unknown) {
       if (
         (error instanceof DOMException || error instanceof Error) &&
@@ -295,7 +377,7 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center p-4 font-[family-name:var(--font-geist-sans)]">
-      <main className="bg-white/95 backdrop-blur-md p-8 rounded-2xl shadow-2xl w-full max-w-lg transition-all duration-300 hover:shadow-indigo-500/20">
+      <main className="bg-white/95 backdrop-blur-md p-6 sm:p-8 rounded-2xl shadow-2xl w-full max-w-lg transition-all duration-300 hover:shadow-indigo-500/20">
         <h1 className="text-3xl font-extrabold text-center mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
           Novel Downloader
         </h1>
@@ -304,10 +386,10 @@ export default function Home() {
           (Nocturne / Moonlight / Midnight — novel18)
         </p>
 
-        {/* Browser Helper Status Banner */}
+        {/* Connection Mode Banner */}
         <div
           className={`mb-5 px-3.5 py-2.5 rounded-xl border text-xs flex items-center justify-between gap-2 ${
-            bridgeVersion
+            nativeMode || bridgeVersion
               ? "bg-emerald-50 border-emerald-200 text-emerald-800"
               : "bg-amber-50 border-amber-200 text-amber-900"
           }`}
@@ -315,23 +397,28 @@ export default function Home() {
           <div className="flex items-center gap-2">
             <span
               className={`w-2.5 h-2.5 rounded-full shrink-0 ${
-                bridgeVersion ? "bg-emerald-500" : "bg-amber-500"
+                nativeMode || bridgeVersion ? "bg-emerald-500" : "bg-amber-500"
               }`}
             />
-            {bridgeVersion ? (
+            {nativeMode ? (
+              <span>
+                <strong>Native Android Mode</strong> — Direct device fetch (no
+                cloud IP blocks, R18 <code>over18=yes</code> enabled)
+              </span>
+            ) : bridgeVersion ? (
               <span>
                 <strong>Browser Helper Active (v{bridgeVersion})</strong> —
-                Narou &amp; R18 fetch directly via your browser IP &amp;
-                over18 cookie
+                Narou &amp; R18 fetch directly via your browser IP &amp; over18
+                cookie
               </span>
             ) : (
               <span>
                 <strong>Server Mode</strong> — Syosetu blocks Vercel/cloud IPs.
-                For Narou &amp; R18, enable the browser helper.
+                For Narou &amp; R18, enable the helper or Android app.
               </span>
             )}
           </div>
-          {!bridgeVersion && (
+          {!nativeMode && !bridgeVersion && (
             <button
               type="button"
               onClick={() => setShowBypassHelp((v) => !v)}
@@ -361,7 +448,7 @@ export default function Home() {
             />
           </div>
 
-          {bridgeVersion && (
+          {!nativeMode && bridgeVersion && (
             <div className="flex items-center gap-2">
               <input
                 id="useBridgeForAll"
@@ -481,7 +568,20 @@ export default function Home() {
                   </div>
                 </div>
               )}
-              {readyEpub && (
+
+              {nativeSaved && (
+                <div className="pt-3 flex gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={handleShareEpub}
+                    className="flex-1 bg-emerald-600 text-white text-sm font-bold py-2.5 px-4 rounded-lg hover:bg-emerald-700 transition-colors"
+                  >
+                    Open / Share EPUB
+                  </button>
+                </div>
+              )}
+
+              {!nativeMode && readyEpub && (
                 <div className="pt-3 flex gap-2 flex-wrap">
                   <a
                     href={readyEpub.url}
@@ -506,8 +606,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* Cloud-IP / R18 Age-Verification Bypass Helper Panel */}
-        {(showBypassHelp || cloudBlocked) && !bridgeVersion && (
+        {/* Cloud-IP / R18 Age-Verification Bypass Helper Panel (Web only) */}
+        {!nativeMode && (showBypassHelp || cloudBlocked) && !bridgeVersion && (
           <div
             className={`mt-6 p-5 rounded-xl border text-xs space-y-4 ${
               cloudBlocked
@@ -562,9 +662,9 @@ export default function Home() {
                 </a>{" "}
                 Safari extension, then install the script below.
                 <br />
-                <strong>Android:</strong> Use{" "}
-                <strong>Firefox for Android</strong> +{" "}
-                <strong>Violentmonkey</strong> (or Edge Android).
+                <strong>Android:</strong> Install the native APK from GitHub
+                Actions, or use <strong>Firefox for Android</strong> +{" "}
+                <strong>Violentmonkey</strong>.
               </p>
               <a
                 href="/novel-downloader.user.js"

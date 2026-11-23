@@ -58,7 +58,8 @@ export async function generateEpub(
   bookId: string,
   chapters: Chapter[],
   zip: JSZip,
-  author?: string
+  author?: string,
+  autoBrowserDownload: boolean = true
 ): Promise<GeneratedEpub> {
   const oebps = zip.folder("OEBPS");
   if (!oebps) throw new Error("Failed to create OEBPS folder");
@@ -165,7 +166,9 @@ ${ncxPoints}
     mimeType: "application/epub+zip",
   });
   const fileName = `${sanitizeFilename(title)}.epub`;
-  saveAs(content, fileName);
+  if (autoBrowserDownload) {
+    saveAs(content, fileName);
+  }
   return { blob: content, fileName };
 }
 

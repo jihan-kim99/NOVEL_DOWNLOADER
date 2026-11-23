@@ -16,6 +16,12 @@
 # next.js
 /.next/
 /out/
+/.capacitor-api-stash/
+/android/.gradle/
+/android/app/build/
+/android/build/
+/android/capacitor-cordova-android-plugins/
+/android/local.properties
 
 # production
 /build
