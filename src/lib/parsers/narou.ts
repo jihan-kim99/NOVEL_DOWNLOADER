@@ -204,10 +204,15 @@ export async function fetchNarouPage(
     const proxiedUrl = customProxyTemplate.includes("{url}")
       ? customProxyTemplate.replace("{url}", encodeURIComponent(initialUrl))
       : `${customProxyTemplate}${encodeURIComponent(initialUrl)}`;
-    const response = await fetchWithRetry(proxiedUrl, {
-      headers: buildNarouHeaders(userAgent, extraCookie),
-    });
-    return { response, finalUrl: initialUrl };
+    const headers = buildNarouHeaders(userAgent, extraCookie);
+    const proxyToken =
+      process.env.SYOSETU_PROXY_TOKEN || process.env.FETCH_PROXY_TOKEN;
+    if (proxyToken) {
+      headers["x-proxy-token"] = proxyToken;
+    }
+    const response = await fetchWithRetry(proxiedUrl, { headers });
+    const resolvedUrl = response.headers.get("x-final-url") || initialUrl;
+    return { response, finalUrl: resolvedUrl };
   }
 
   let currentUrl = initialUrl;
@@ -349,6 +354,9 @@ export function parseNarouEpisode(
   const $ = cheerio.load(html);
 
   let title = $("h1.p-novel__title").first().text().trim();
+  if (!title) title = $(".p-novel__title").first().text().trim();
+  if (!title) title = $(".p-novel__subtitle-episode").first().text().trim();
+  if (!title) title = $(".p-novel__subtitle").first().text().trim();
   if (!title) title = $(".novel_subtitle").first().text().trim();
   if (!title) title = $("h1").first().text().trim();
   if (!title) title = "Episode";

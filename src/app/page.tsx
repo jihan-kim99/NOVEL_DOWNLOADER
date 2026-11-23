@@ -29,6 +29,11 @@ export default function Home() {
   const [useBridgeForAll, setUseBridgeForAll] = useState(false);
   const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
   const [showBypassHelp, setShowBypassHelp] = useState(false);
+  const [readyEpub, setReadyEpub] = useState<{
+    url: string;
+    blob: Blob;
+    fileName: string;
+  } | null>(null);
 
   const abortControllerRef = useRef<AbortController | null>(null);
 
@@ -62,6 +67,28 @@ export default function Home() {
     };
   }, []);
 
+  useEffect(() => {
+    return () => {
+      if (readyEpub) {
+        URL.revokeObjectURL(readyEpub.url);
+      }
+    };
+  }, [readyEpub]);
+
+  const handleShareEpub = async () => {
+    if (!readyEpub || typeof navigator === "undefined" || !navigator.share) {
+      return;
+    }
+    try {
+      const file = new File([readyEpub.blob], readyEpub.fileName, {
+        type: "application/epub+zip",
+      });
+      await navigator.share({ files: [file], title: readyEpub.fileName });
+    } catch {
+      // User cancelled share sheet
+    }
+  };
+
   const handleCopyBookmarklet = async () => {
     const code = `javascript:(function(){var s=document.createElement('script');s.src='${window.location.origin}/bookmarklet.js?t='+Date.now();document.head.appendChild(s);})();`;
     try {
@@ -87,6 +114,10 @@ export default function Home() {
     setNovelAuthor("");
     setDownloadedCount(0);
     setTotalEpisodes(null);
+    setReadyEpub((prev) => {
+      if (prev) URL.revokeObjectURL(prev.url);
+      return null;
+    });
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -220,7 +251,18 @@ export default function Home() {
       }
 
       setStatus("Generating EPUB...");
-      await generateEpub(info.title, bookId, chapters, zip, info.author);
+      const generated = await generateEpub(
+        info.title,
+        bookId,
+        chapters,
+        zip,
+        info.author
+      );
+      setReadyEpub({
+        url: URL.createObjectURL(generated.blob),
+        blob: generated.blob,
+        fileName: generated.fileName,
+      });
       setStatus(`Download complete! (${chapters.length} episodes saved)`);
     } catch (error: unknown) {
       if (
@@ -439,6 +481,27 @@ export default function Home() {
                   </div>
                 </div>
               )}
+              {readyEpub && (
+                <div className="pt-3 flex gap-2 flex-wrap">
+                  <a
+                    href={readyEpub.url}
+                    download={readyEpub.fileName}
+                    className="flex-1 text-center bg-emerald-600 text-white text-sm font-bold py-2.5 px-4 rounded-lg hover:bg-emerald-700 transition-colors"
+                  >
+                    Save EPUB File
+                  </a>
+                  {typeof navigator !== "undefined" &&
+                    typeof navigator.share === "function" && (
+                      <button
+                        type="button"
+                        onClick={handleShareEpub}
+                        className="flex-1 bg-indigo-600 text-white text-sm font-bold py-2.5 px-4 rounded-lg hover:bg-indigo-700 transition-colors"
+                      >
+                        Share / Open in Books
+                      </button>
+                    )}
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -458,19 +521,18 @@ export default function Home() {
               </h3>
               <p className="text-gray-600 leading-relaxed">
                 Syosetu blocks datacenter IPs (like Vercel/AWS) and public CORS
-                proxies cannot send the <code>over18=yes</code> cookie. Use
-                either option below so requests run directly from your own
-                browser IP:
+                proxies cannot send the <code>over18=yes</code> cookie. Pick the
+                option that fits Desktop or Mobile:
               </p>
             </div>
 
             <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-2">
               <div className="font-bold text-gray-900">
-                Option 1: Install Helper Userscript (Best — works right in this
-                page)
+                Option 1: Helper Userscript (Desktop &amp; Mobile Safari /
+                Firefox)
               </div>
-              <p className="text-gray-600">
-                Requires{" "}
+              <p className="text-gray-600 leading-relaxed">
+                <strong>Desktop:</strong>{" "}
                 <a
                   href="https://www.tampermonkey.net/"
                   target="_blank"
@@ -488,9 +550,21 @@ export default function Home() {
                 >
                   Violentmonkey
                 </a>
-                . After installing, refresh this page — Narou &amp; R18 will
-                download directly through your browser, plus a{" "}
-                <strong>Download EPUB</strong> button appears on novel pages.
+                .<br />
+                <strong>iPhone / iPad (Safari):</strong> Install the free{" "}
+                <a
+                  href="https://apps.apple.com/app/userscripts/id1463298887"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-blue-600 underline"
+                >
+                  Userscripts
+                </a>{" "}
+                Safari extension, then install the script below.
+                <br />
+                <strong>Android:</strong> Use{" "}
+                <strong>Firefox for Android</strong> +{" "}
+                <strong>Violentmonkey</strong> (or Edge Android).
               </p>
               <a
                 href="/novel-downloader.user.js"
@@ -504,13 +578,20 @@ export default function Home() {
 
             <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-2">
               <div className="font-bold text-gray-900">
-                Option 2: Zero-Extension Bookmarklet
+                Option 2: Zero-Extension Bookmarklet (Stock iOS Safari &amp;
+                Android Chrome)
               </div>
-              <p className="text-gray-600">
-                Drag this button to your bookmarks bar. Then open any novel on{" "}
+              <p className="text-gray-600 leading-relaxed">
+                <strong>On Desktop:</strong> Drag the purple button to your
+                bookmarks bar.
+                <br />
+                <strong>On Mobile (no apps needed):</strong> Tap{" "}
+                <strong>Copy Bookmarklet Code</strong> → bookmark any page →
+                edit that bookmark&apos;s URL and paste the code (name it{" "}
+                <code>dl</code>). Then open a novel on{" "}
                 <code>ncode.syosetu.com</code>,{" "}
-                <code>novel18.syosetu.com</code>, or <code>kakuyomu.jp</code>{" "}
-                and click the bookmark to download the EPUB directly:
+                <code>novel18.syosetu.com</code>, or <code>kakuyomu.jp</code>,
+                type <code>dl</code> in the address bar, and tap the bookmark!
               </p>
               <div className="flex items-center gap-2 flex-wrap">
                 <a
@@ -519,7 +600,7 @@ export default function Home() {
                   onClick={(e) => {
                     e.preventDefault();
                     alert(
-                      "Drag this button to your browser's bookmarks bar, then click it while viewing a novel on Narou, novel18, or Kakuyomu."
+                      "Desktop: drag this button to your bookmarks bar.\nMobile: tap 'Copy Bookmarklet Code', edit any bookmark's URL to paste it, then run it from the address bar on a Narou / novel18 / Kakuyomu page."
                     );
                   }}
                   className="inline-block bg-purple-600 text-white font-semibold px-3.5 py-2 rounded-lg hover:bg-purple-700 cursor-grab transition-colors"
@@ -534,6 +615,22 @@ export default function Home() {
                   {copiedBookmarklet ? "Copied!" : "Copy Bookmarklet Code"}
                 </button>
               </div>
+            </div>
+
+            <div className="p-3 bg-white rounded-lg border border-gray-200 space-y-1.5">
+              <div className="font-bold text-gray-900">
+                Option 3: Stock Mobile Browser directly on Vercel (Self-Hosted
+                Home Relay)
+              </div>
+              <p className="text-gray-600 leading-relaxed">
+                To make stock mobile browsers work directly on this Vercel page
+                with zero phone setup, run{" "}
+                <code>PROXY_TOKEN=secret node proxy/server.mjs</code> on a home
+                PC/Pi behind <code>cloudflared tunnel</code> and set{" "}
+                <code>SYOSETU_PROXY_URL</code> &amp;{" "}
+                <code>SYOSETU_PROXY_TOKEN</code> in Vercel Environment
+                Variables.
+              </p>
             </div>
           </div>
         )}

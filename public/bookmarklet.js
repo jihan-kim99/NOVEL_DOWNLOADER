@@ -147,19 +147,21 @@
     const box = document.createElement("div");
     box.id = "novel-dl-overlay";
     box.style.cssText =
-      "position:fixed;bottom:20px;right:20px;z-index:2147483647;background:#1e1b4b;color:#fff;padding:16px 18px;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,0.4);font-family:system-ui,-apple-system,sans-serif;font-size:13px;width:320px;line-height:1.5;";
+      "position:fixed;bottom:14px;right:14px;left:14px;margin-left:auto;z-index:2147483647;background:#1e1b4b;color:#fff;padding:16px 18px;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,0.45);font-family:system-ui,-apple-system,sans-serif;font-size:14px;max-width:360px;line-height:1.5;box-sizing:border-box;";
     box.innerHTML =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">' +
-      '<strong style="font-size:14px;">Novel Downloader</strong>' +
-      '<button id="novel-dl-cancel" style="background:#ef4444;color:#fff;border:none;border-radius:6px;padding:3px 9px;cursor:pointer;font-size:12px;font-weight:600;">Cancel</button>' +
+      '<strong style="font-size:15px;">Novel Downloader</strong>' +
+      '<button id="novel-dl-cancel" style="background:#ef4444;color:#fff;border:none;border-radius:8px;padding:5px 11px;cursor:pointer;font-size:12px;font-weight:600;">Cancel</button>' +
       "</div>" +
       '<div id="novel-dl-title" style="font-weight:600;color:#c7d2fe;margin-bottom:6px;word-break:break-word;"></div>' +
       '<div id="novel-dl-status" style="color:#e0e7ff;">Initializing...</div>' +
-      '<div style="margin-top:8px;height:6px;background:rgba(255,255,255,0.2);border-radius:999px;overflow:hidden;">' +
+      '<div style="margin-top:8px;height:7px;background:rgba(255,255,255,0.2);border-radius:999px;overflow:hidden;">' +
       '<div id="novel-dl-bar" style="height:100%;width:10%;background:linear-gradient(90deg,#60a5fa,#c084fc);transition:width .2s;"></div>' +
-      "</div>";
+      "</div>" +
+      '<div id="novel-dl-actions" style="display:none;margin-top:12px;gap:8px;flex-wrap:wrap;"></div>';
     document.body.appendChild(box);
     const cancelBtn = box.querySelector("#novel-dl-cancel");
+    const actionsEl = box.querySelector("#novel-dl-actions");
     cancelBtn.addEventListener("click", onCancel);
     return {
       setTitle(t) {
@@ -171,6 +173,43 @@
       setProgress(pct) {
         box.querySelector("#novel-dl-bar").style.width =
           Math.max(5, Math.min(100, pct)) + "%";
+      },
+      showDownloadActions(blob, fileName) {
+        const blobUrl = URL.createObjectURL(blob);
+        actionsEl.style.display = "flex";
+        actionsEl.innerHTML = "";
+
+        const dlLink = document.createElement("a");
+        dlLink.href = blobUrl;
+        dlLink.download = fileName;
+        dlLink.textContent = "Save EPUB";
+        dlLink.style.cssText =
+          "flex:1;text-align:center;background:#10b981;color:#fff;text-decoration:none;font-weight:700;padding:9px 12px;border-radius:8px;font-size:13px;";
+        actionsEl.appendChild(dlLink);
+
+        if (typeof navigator !== "undefined" && typeof navigator.share === "function") {
+          try {
+            const file = new File([blob], fileName, {
+              type: "application/epub+zip",
+            });
+            if (!navigator.canShare || navigator.canShare({ files: [file] })) {
+              const shareBtn = document.createElement("button");
+              shareBtn.type = "button";
+              shareBtn.textContent = "Share / Books";
+              shareBtn.style.cssText =
+                "flex:1;background:#6366f1;color:#fff;border:none;font-weight:700;padding:9px 12px;border-radius:8px;font-size:13px;cursor:pointer;";
+              shareBtn.onclick = () => {
+                navigator.share({ files: [file], title: fileName }).catch(() => {});
+              };
+              actionsEl.appendChild(shareBtn);
+            }
+          } catch {
+            // Share API not supported for files
+          }
+        }
+
+        // Also trigger automatic download (works on desktop & Android; iOS users can tap Save/Share above)
+        dlLink.click();
       },
       done(msg) {
         box.querySelector("#novel-dl-status").textContent = msg;
@@ -264,6 +303,9 @@
   function parseNarouEpDoc(doc, ncode) {
     const title =
       doc.querySelector("h1.p-novel__title")?.textContent?.trim() ||
+      doc.querySelector(".p-novel__title")?.textContent?.trim() ||
+      doc.querySelector(".p-novel__subtitle-episode")?.textContent?.trim() ||
+      doc.querySelector(".p-novel__subtitle")?.textContent?.trim() ||
       doc.querySelector(".novel_subtitle")?.textContent?.trim() ||
       doc.querySelector("h1")?.textContent?.trim() ||
       "Episode";
@@ -525,14 +567,7 @@ ${chapters
       type: "blob",
       mimeType: "application/epub+zip",
     });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${sanitizeFilename(title)}.epub`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 10000);
+    return { blob, fileName: `${sanitizeFilename(title)}.epub` };
   }
 
   async function run() {
@@ -635,14 +670,15 @@ ${chapters
 
       ui.setStatus("Building EPUB...");
       ui.setProgress(100);
-      await buildAndSaveEpub(
+      const { blob, fileName } = await buildAndSaveEpub(
         JSZip,
         info.title,
         bookId,
         info.author,
         chapters
       );
-      ui.done(`Done! Saved ${chapters.length} episodes.`);
+      ui.showDownloadActions(blob, fileName);
+      ui.done(`Ready! ${chapters.length} episodes. Tap Save EPUB if download didn't start.`);
     } catch (err) {
       if (err && err.name === "AbortError") {
         ui.done("Download cancelled.");
