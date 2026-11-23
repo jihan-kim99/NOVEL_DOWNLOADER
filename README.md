@@ -1,35 +1,26 @@
 # Novel Downloader
 
-This is a [Next.js](https://nextjs.org) project designed to download novels from Kakuyomu.
+A [Next.js](https://nextjs.org) app that downloads web novels as valid EPUB 3 files.
 
-## Features
+## Supported Websites
 
-- **Next.js Backend**: Uses API routes to handle download logic.
-- **Vercel Ready**: Optimized for deployment on Vercel.
-- **Simple UI**: Easy to use interface for inputting novel URLs.
+- **Kakuyomu** (`https://kakuyomu.jp/works/<id>`)
+- **Shosetsuka ni Narou** (`https://ncode.syosetu.com/<ncode>/`)
+- **Narou R18** — **Nocturne Novels**, **Moonlight Novels**, and **Midnight Novels** (`https://novel18.syosetu.com/<ncode>/`, plus URLs from `noc.syosetu.com`, `mnlt.syosetu.com`, `mid.syosetu.com`, `nl.syosetu.com/redirect/ageauth/...`, or bare ncodes like `n1234ab`)
+
+Supports both serialized novels and short stories (短編), preserves ruby annotations (furigana) and paragraph formatting, and produces XML-valid EPUB files.
 
 ## Getting Started
 
-First, run the development server:
-
 ```bash
-npm run dev
-# or
+yarn install
 yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
 ## API Routes
 
-The project includes an API route at `/api/download` which accepts POST requests with a JSON body containing the `url` of the novel.
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `POST /api/kakuyomu` — Kakuyomu info, episode, and fallback HTML parsing (`info`, `episode`, `parse-info`, `parse-episode`)
+- `POST /api/narou` — Narou & Narou R18 (`ncode` / `novel18`) info, episode, and fallback HTML parsing (`info`, `episode`, `parse-info`, `parse-episode`, `fetch`)
+- `POST /api/download` — Unified endpoint supporting both platforms

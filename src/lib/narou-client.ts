@@ -1,110 +1,160 @@
-export async function fetchWithFallback(
-  url: string,
-  options: any,
-  fallbackType: string,
+interface FetchRequestOptions {
+  method?: string;
+  headers?: Record<string, string>;
+  body?: string;
+  signal?: AbortSignal;
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof DOMException && err.name === "AbortError"
+  ) || (err instanceof Error && err.name === "AbortError");
+}
+
+async function readErrorMessage(res: Response): Promise<string> {
+  try {
+    const data = await res.json();
+    if (data && typeof data.error === "string" && data.error.trim()) {
+      return data.error;
+    }
+  } catch {
+    // Ignore JSON parse errors
+  }
+  return `Request failed with status ${res.status}`;
+}
+
+async function fetchViaCorsProxies(
+  targetUrl: string,
+  signal?: AbortSignal
+): Promise<string> {
+  const attempts: Array<{
+    name: string;
+    run: () => Promise<string>;
+  }> = [
+    {
+      name: "allorigins-raw",
+      run: async () => {
+        const res = await fetch(
+          `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+          { signal }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      },
+    },
+    {
+      name: "allorigins-json",
+      run: async () => {
+        const res = await fetch(
+          `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`,
+          { signal }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        return typeof data?.contents === "string" ? data.contents : "";
+      },
+    },
+    {
+      name: "codetabs",
+      run: async () => {
+        const res = await fetch(
+          `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(
+            targetUrl
+          )}`,
+          { signal }
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.text();
+      },
+    },
+  ];
+
+  for (const attempt of attempts) {
+    try {
+      const html = await attempt.run();
+      if (html && html.trim().length > 0) {
+        return html;
+      }
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      console.warn(`CORS proxy "${attempt.name}" failed:`, err);
+    }
+  }
+
+  throw new Error(
+    "All client-side CORS proxies failed to fetch content. Try unchecking Force Client-Side Download to use the server."
+  );
+}
+
+export async function fetchWithFallback<T>(
+  apiEndpoint: string,
+  options: FetchRequestOptions,
+  fallbackType: "parse-info" | "parse-episode",
   fallbackUrl: string,
   setStatus: (status: string) => void,
   forceClientSide: boolean = false,
   onFallback?: () => void
-) {
+): Promise<T> {
   let useFallback = forceClientSide;
 
   if (!useFallback) {
     try {
-      const res = await fetch(url, options);
-      if (!res.ok) {
-        if (res.status === 403 || res.status === 500) {
-          throw new Error("Server blocked");
-        }
-        throw new Error(`Failed with status ${res.status}`);
+      const res = await fetch(apiEndpoint, options);
+      if (res.ok) {
+        return (await res.json()) as T;
       }
-      return res.json();
-    } catch (error) {
-      console.warn("Primary fetch failed, trying fallback...", error);
-      setStatus("Primary fetch failed, switching to client-side fallback...");
+
+      const errorMessage = await readErrorMessage(res);
+
+      // Do not fall back to CORS proxies on client/not-found errors (e.g. bad URL or 404)
+      if (res.status === 400 || res.status === 404) {
+        throw new Error(errorMessage);
+      }
+
+      // 403 (IP block), 429, or 5xx: fall back to client-side proxy
+      console.warn(
+        `Primary server fetch returned ${res.status}: ${errorMessage}`
+      );
+      setStatus("Server fetch blocked/failed, trying client-side fallback...");
       useFallback = true;
       if (onFallback) onFallback();
-    }
-  }
-
-  // Fallback: Fetch via CORS proxy
-  let html = "";
-
-  // 1. Try corsproxy.io
-  try {
-    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(fallbackUrl)}`;
-
-    // Extract userAgent from options if available
-    const bodyObj = options.body ? JSON.parse(options.body) : {};
-    const ua =
-      bodyObj.userAgent ||
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
-
-    const proxyRes = await fetch(proxyUrl, {
-      headers: {
-        "User-Agent": ua,
-        Cookie: "over18=yes",
-        Accept:
-          "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
-        "Accept-Language": "en-US,en;q=0.9,ja;q=0.8",
-        Referer: "https://syosetu.com/",
-        "Sec-Ch-Ua":
-          '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-        "Sec-Ch-Ua-Mobile": "?0",
-        "Sec-Ch-Ua-Platform": '"Windows"',
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "cross-site",
-        "Upgrade-Insecure-Requests": "1",
-      },
-    });
-    if (proxyRes.ok) {
-      html = await proxyRes.text();
-    }
-  } catch (e) {
-    console.warn("corsproxy.io failed", e);
-  }
-
-  // 2. Try allorigins.win if first failed
-  if (!html) {
-    try {
-      const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(
-        fallbackUrl
-      )}&timestamp=${Date.now()}`;
-      const proxyRes = await fetch(proxyUrl);
-      if (proxyRes.ok) {
-        const proxyData = await proxyRes.json();
-        html = proxyData.contents;
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      // Re-throw non-network explicit 400/404 errors thrown above
+      if (
+        err instanceof Error &&
+        !useFallback &&
+        err.name !== "TypeError"
+      ) {
+        throw err;
       }
-    } catch (e) {
-      console.warn("allorigins failed", e);
+      if (!useFallback) {
+        console.warn("Primary fetch network error, trying fallback...", err);
+        setStatus("Server unreachable, trying client-side fallback...");
+        useFallback = true;
+        if (onFallback) onFallback();
+      }
     }
   }
 
-  if (!html) throw new Error("All proxies failed to fetch content");
+  const html = await fetchViaCorsProxies(fallbackUrl, options.signal);
 
-  // Send HTML to server for parsing
-  // Determine which API to call for parsing based on the original URL or options
-  // Since this is a generic fetcher, we might need to know the platform.
-  // However, the original code called /api/download. Now we have /api/narou and /api/kakuyomu.
-  // We can infer from the URL or pass it in.
-  // For now, let's assume the caller passes the correct parsing endpoint in `url` if it was a direct call,
-  // but here we are doing a fallback. The fallback needs to call the parsing endpoint.
-  // The original code called /api/download with type=parse-info/parse-episode.
-  // We should probably pass the parsing endpoint as an argument or derive it.
-
-  // Let's assume the `url` passed to this function was the API endpoint (e.g. /api/narou).
-  // So we can reuse it for parsing.
-  const parseRes = await fetch(url, {
+  const originalBody = options.body ? JSON.parse(options.body) : {};
+  const parseRes = await fetch(apiEndpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
+    signal: options.signal,
     body: JSON.stringify({
-      ...JSON.parse(options.body),
+      ...originalBody,
       type: fallbackType,
       html,
     }),
   });
 
-  if (!parseRes.ok) throw new Error("Parse request failed");
-  return parseRes.json();
+  if (!parseRes.ok) {
+    const parseErr = await readErrorMessage(parseRes);
+    throw new Error(parseErr);
+  }
+
+  return (await parseRes.json()) as T;
 }

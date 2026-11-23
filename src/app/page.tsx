@@ -1,26 +1,46 @@
 "use client";
 
-import { useState } from "react";
-import { saveAs } from "file-saver";
-import { initializeEpub, generateEpub, Chapter } from "../lib/epub";
+import { useRef, useState } from "react";
+import {
+  buildChapterXhtml,
+  Chapter,
+  generateEpub,
+  initializeEpub,
+} from "../lib/epub";
 import { fetchWithFallback } from "../lib/narou-client";
+import { parseNovelInput } from "../lib/url-parser";
+import type { Episode, NovelInfo } from "../types";
 
 export default function Home() {
   const [input, setInput] = useState("");
   const [status, setStatus] = useState("");
+  const [isError, setIsError] = useState(false);
   const [novelTitle, setNovelTitle] = useState("");
+  const [novelAuthor, setNovelAuthor] = useState("");
   const [downloadedCount, setDownloadedCount] = useState(0);
+  const [totalEpisodes, setTotalEpisodes] = useState<number | null>(null);
   const [loading, setLoading] = useState(false);
   const [forceClientSide, setForceClientSide] = useState(false);
+
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const handleCancel = () => {
+    abortControllerRef.current?.abort();
+  };
 
   const handleDownload = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setIsError(false);
     setStatus("Initializing...");
     setNovelTitle("");
+    setNovelAuthor("");
     setDownloadedCount(0);
+    setTotalEpisodes(null);
 
-    // Local flag to track fallback status within this download session
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+
     let currentUseClientSide = forceClientSide;
     const enableClientSide = () => {
       currentUseClientSide = true;
@@ -28,57 +48,32 @@ export default function Home() {
     };
 
     try {
-      // Extract Book ID and Platform
-      let bookId = input.trim();
-      let platform = "kakuyomu"; // Default
-      let domain = "";
+      const parsed = parseNovelInput(input);
+      const { platform, bookId, explicitDomain, siteLabel } = parsed;
+      let domain = parsed.domain;
 
-      if (bookId.includes("kakuyomu.jp/works/")) {
-        const parts = bookId.split("kakuyomu.jp/works/");
-        bookId = parts[1].split("/")[0];
-        platform = "kakuyomu";
-      } else if (bookId.includes("ncode.syosetu.com/")) {
-        const parts = bookId.split("ncode.syosetu.com/");
-        bookId = parts[1].split("/")[0];
-        platform = "narou";
-        domain = "ncode.syosetu.com";
-      } else if (bookId.includes("novel18.syosetu.com/")) {
-        const parts = bookId.split("novel18.syosetu.com/");
-        bookId = parts[1].split("/")[0];
-        platform = "narou";
-        domain = "novel18.syosetu.com";
-      } else if (bookId.toLowerCase().startsWith("n")) {
-        // Simple heuristic: Narou IDs often start with 'n' (e.g., n5511kh)
-        platform = "narou";
-        // Default to ncode if just ID is provided, but this might fail for R18
-        domain = "ncode.syosetu.com";
-      }
-
-      if (!bookId) {
-        throw new Error("Invalid Book ID or URL");
-      }
-
-      // Determine API endpoint
       const apiEndpoint = platform === "narou" ? "/api/narou" : "/api/kakuyomu";
 
-      // Get Novel Info
-      setStatus(`Fetching novel info from ${platform}...`);
+      setStatus(`Fetching novel info from ${siteLabel}...`);
 
-      let targetUrlForInfo = "";
-      if (platform === "narou") {
-        targetUrlForInfo = `https://${
-          domain || "ncode.syosetu.com"
-        }/${bookId}/`;
-      } else {
-        targetUrlForInfo = `https://kakuyomu.jp/works/${bookId}`;
-      }
+      const targetUrlForInfo =
+        platform === "narou"
+          ? `https://${domain}/${bookId}/`
+          : `https://kakuyomu.jp/works/${bookId}`;
 
-      const { title, firstUrl, userAgent } = await fetchWithFallback(
+      const info = await fetchWithFallback<NovelInfo>(
         apiEndpoint,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ type: "info", bookId, platform, domain }),
+          signal: controller.signal,
+          body: JSON.stringify({
+            type: "info",
+            bookId,
+            platform,
+            domain,
+            explicitDomain,
+          }),
         },
         "parse-info",
         targetUrlForInfo,
@@ -87,34 +82,49 @@ export default function Home() {
         enableClientSide
       );
 
-      setStatus(`Found novel: ${title}`);
-      setNovelTitle(title);
+      if (info.domain) {
+        domain = info.domain;
+      }
 
-      // Initialize EPUB
+      setNovelTitle(info.title);
+      if (info.author) setNovelAuthor(info.author);
+      if (info.totalEpisodes) setTotalEpisodes(info.totalEpisodes);
+      setStatus(`Found novel: ${info.title}`);
+
       const { zip, oebps } = initializeEpub();
-
       const chapters: Chapter[] = [];
-      let currentUrl = firstUrl;
+      const visitedUrls = new Set<string>();
+
+      let currentUrl: string | null = info.firstUrl;
       let episodeNum = 1;
 
       while (currentUrl) {
-        setStatus(`Downloading episode ${episodeNum}...`);
+        if (controller.signal.aborted) {
+          throw new DOMException("Download cancelled", "AbortError");
+        }
+        if (visitedUrls.has(currentUrl)) {
+          break;
+        }
+        visitedUrls.add(currentUrl);
 
-        const {
-          title: epTitle,
-          content,
-          nextUrl,
-        } = await fetchWithFallback(
+        setStatus(
+          info.totalEpisodes
+            ? `Downloading episode ${episodeNum} of ${info.totalEpisodes}...`
+            : `Downloading episode ${episodeNum}...`
+        );
+
+        const ep: Episode = await fetchWithFallback<Episode>(
           apiEndpoint,
           {
             method: "POST",
             headers: { "Content-Type": "application/json" },
+            signal: controller.signal,
             body: JSON.stringify({
               type: "episode",
               url: currentUrl,
-              userAgent,
+              userAgent: info.userAgent,
               platform,
-              domain, // Pass domain for Narou parsing if needed
+              domain,
             }),
           },
           "parse-episode",
@@ -124,51 +134,78 @@ export default function Home() {
           enableClientSide
         );
 
-        if (!content) {
+        if (!ep.content) {
           break;
         }
 
         const fileName = `chapter_${episodeNum}.xhtml`;
-        oebps.file(
-          fileName,
-          `<?xml version="1.0" encoding="utf-8"?>
-<!DOCTYPE html>
-<html xmlns="http://www.w3.org/1999/xhtml" xmlns:epub="http://www.idpf.org/2007/ops" lang="ja">
-<head>
-<title>${epTitle}</title>
-</head>
-<body>
-<h3>${epTitle}</h3>
-${content}
-</body>
-</html>`
-        );
+        oebps.file(fileName, buildChapterXhtml(ep.title, ep.content));
+        chapters.push({ title: ep.title, fileName });
 
-        chapters.push({ title: epTitle, fileName });
-
-        currentUrl = nextUrl;
+        setDownloadedCount(episodeNum);
+        currentUrl = ep.nextUrl;
         episodeNum++;
-        setDownloadedCount((prev) => prev + 1);
+
+        // Polite short delay between episodes to avoid rate limiting
+        if (currentUrl) {
+          await new Promise<void>((resolve, reject) => {
+            const timer = setTimeout(resolve, 150);
+            controller.signal.addEventListener(
+              "abort",
+              () => {
+                clearTimeout(timer);
+                reject(new DOMException("Download cancelled", "AbortError"));
+              },
+              { once: true }
+            );
+          });
+        }
+      }
+
+      if (chapters.length === 0) {
+        throw new Error(
+          "No readable episode content was found for this novel."
+        );
       }
 
       setStatus("Generating EPUB...");
-      await generateEpub(title, bookId, chapters, zip);
-
-      setStatus("Download complete!");
-    } catch (error: any) {
-      console.error(error);
-      setStatus(`Error: ${error.message}`);
+      await generateEpub(info.title, bookId, chapters, zip, info.author);
+      setStatus(`Download complete! (${chapters.length} episodes saved)`);
+    } catch (error: unknown) {
+      if (
+        (error instanceof DOMException || error instanceof Error) &&
+        error.name === "AbortError"
+      ) {
+        setStatus("Download cancelled.");
+        setIsError(false);
+      } else {
+        console.error(error);
+        const message =
+          error instanceof Error ? error.message : "Unknown error occurred";
+        setStatus(`Error: ${message}`);
+        setIsError(true);
+      }
     } finally {
+      abortControllerRef.current = null;
       setLoading(false);
     }
   };
 
+  const progressPercent =
+    totalEpisodes && totalEpisodes > 0
+      ? Math.min(100, Math.round((downloadedCount / totalEpisodes) * 100))
+      : null;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-indigo-500 via-purple-500 to-pink-500 flex items-center justify-center p-4 font-[family-name:var(--font-geist-sans)]">
       <main className="bg-white/95 backdrop-blur-md p-8 rounded-2xl shadow-2xl w-full max-w-lg transition-all duration-300 hover:shadow-indigo-500/20">
-        <h1 className="text-3xl font-extrabold text-center mb-8 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
+        <h1 className="text-3xl font-extrabold text-center mb-2 bg-clip-text text-transparent bg-gradient-to-r from-blue-600 to-purple-600">
           Novel Downloader
         </h1>
+        <p className="text-xs text-center text-gray-500 mb-6">
+          Supports Kakuyomu, Shosetsuka ni Narou (ncode), and Narou R18
+          (Nocturne / Moonlight / Midnight — novel18)
+        </p>
 
         <form onSubmit={handleDownload} className="flex flex-col gap-6">
           <div className="flex flex-col gap-2">
@@ -176,7 +213,7 @@ ${content}
               htmlFor="url"
               className="text-sm font-semibold text-gray-700"
             >
-              Novel URL or ID (Kakuyomu / Narou)
+              Novel URL or ID
             </label>
             <div className="relative">
               <input
@@ -184,7 +221,7 @@ ${content}
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                placeholder="https://kakuyomu.jp/works/... or https://ncode.syosetu.com/..."
+                placeholder="kakuyomu.jp/works/..., ncode.syosetu.com/..., novel18.syosetu.com/..."
                 className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent outline-none transition-all text-gray-800 placeholder-gray-400"
                 required
               />
@@ -203,43 +240,55 @@ ${content}
               htmlFor="forceClientSide"
               className="text-sm font-medium text-gray-700"
             >
-              Force Client-Side Download (Use if server fails)
+              Force Client-Side Proxy (not recommended for R18 novel18)
             </label>
           </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="w-full bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
-          >
-            {loading ? (
-              <span className="flex items-center justify-center gap-2">
-                <svg
-                  className="animate-spin h-5 w-5 text-white"
-                  xmlns="http://www.w3.org/2000/svg"
-                  fill="none"
-                  viewBox="0 0 24 24"
-                >
-                  <circle
-                    className="opacity-25"
-                    cx="12"
-                    cy="12"
-                    r="10"
-                    stroke="currentColor"
-                    strokeWidth="4"
-                  ></circle>
-                  <path
-                    className="opacity-75"
-                    fill="currentColor"
-                    d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
-                  ></path>
-                </svg>
-                Processing...
-              </span>
-            ) : (
-              "Download EPUB"
+          <div className="flex gap-2">
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-gradient-to-r from-blue-600 to-purple-600 text-white font-bold py-3 px-4 rounded-lg hover:opacity-90 transition-opacity disabled:opacity-50 disabled:cursor-not-allowed shadow-md"
+            >
+              {loading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <svg
+                    className="animate-spin h-5 w-5 text-white"
+                    xmlns="http://www.w3.org/2000/svg"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                  >
+                    <circle
+                      className="opacity-25"
+                      cx="12"
+                      cy="12"
+                      r="10"
+                      stroke="currentColor"
+                      strokeWidth="4"
+                    ></circle>
+                    <path
+                      className="opacity-75"
+                      fill="currentColor"
+                      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                    ></path>
+                  </svg>
+                  Processing...
+                </span>
+              ) : (
+                "Download EPUB"
+              )}
+            </button>
+
+            {loading && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="px-4 py-3 rounded-lg bg-red-500 text-white font-semibold hover:bg-red-600 transition-colors shadow-md"
+              >
+                Cancel
+              </button>
             )}
-          </button>
+          </div>
         </form>
 
         {(novelTitle || status) && (
@@ -250,15 +299,22 @@ ${content}
                   Target Novel
                 </h2>
                 <p className="text-xl font-bold text-gray-800">{novelTitle}</p>
+                {novelAuthor && (
+                  <p className="text-sm text-gray-500 mt-1">{novelAuthor}</p>
+                )}
               </div>
             )}
 
             <div className="space-y-2">
-              <div className="flex justify-between items-center">
-                <span className="text-sm font-medium text-gray-600">
+              <div className="flex justify-between items-start gap-3">
+                <span className="text-sm font-medium text-gray-600 shrink-0">
                   Status
                 </span>
-                <span className="text-sm font-bold text-purple-600">
+                <span
+                  className={`text-sm font-bold text-right ${
+                    isError ? "text-red-600" : "text-purple-600"
+                  }`}
+                >
                   {status}
                 </span>
               </div>
@@ -267,14 +323,25 @@ ${content}
                 <div className="mt-2">
                   <div className="flex justify-between text-xs text-gray-500 mb-1">
                     <span>Progress</span>
-                    <span>{downloadedCount} episodes</span>
+                    <span>
+                      {totalEpisodes
+                        ? `${downloadedCount} / ${totalEpisodes} episodes (${progressPercent}%)`
+                        : `${downloadedCount} episodes`}
+                    </span>
                   </div>
                   <div className="w-full bg-gray-200 rounded-full h-2.5 overflow-hidden">
                     <div
-                      className="bg-gradient-to-r from-blue-500 to-purple-500 h-2.5 rounded-full transition-all duration-500 ease-out"
-                      style={{ width: "100%" }} // Indeterminate or we could calculate if we knew total
+                      className="bg-gradient-to-r from-blue-500 to-purple-500 h-2.5 rounded-full transition-all duration-300 ease-out"
+                      style={{
+                        width:
+                          progressPercent !== null
+                            ? `${progressPercent}%`
+                            : "100%",
+                      }}
                     >
-                      <div className="w-full h-full animate-pulse bg-white/30"></div>
+                      {loading && (
+                        <div className="w-full h-full animate-pulse bg-white/30"></div>
+                      )}
                     </div>
                   </div>
                 </div>
